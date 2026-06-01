@@ -416,22 +416,27 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       {/* HEADER */}
       <header style={s.header}>
         <div style={s.headerInner}>
-          <div>
+          {/* Top bar: sync left, clear right */}
+          <div style={s.headerTopBar}>
+            {syncStatus && syncStatus !== "unconfigured" ? (
+              <div style={{...s.syncIndicator,...(syncStatus==="error"?s.syncError:syncStatus==="synced"?s.syncOk:s.syncBusy)}}>
+                {syncStatus==="loading"||syncStatus==="syncing" ? "🔄 Syncing…" : syncStatus==="synced" ? "✓ Synced" : "⚠ Sync error"}
+              </div>
+            ) : <div />}
+            <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => { setShowClearConfirm(true); history.pushState({ overlay: "clearConfirm" }, ""); }} title="Clear week">
+              <span style={{fontSize:14}}>🗑</span>
+              <span style={s.clearWeekLabel}>Clear</span>
+            </button>
+          </div>
+          {/* Centered title */}
+          <div style={s.headerTitleBlock}>
             <div style={s.eyebrow}>Weekly Meal Planner</div>
             <h1 style={s.title}>What's Cooking?</h1>
             <div style={s.weekRange}>{getWeekRange()}</div>
-            {syncStatus && syncStatus !== "unconfigured" && (
-              <div style={{
-                ...s.syncIndicator,
-                ...(syncStatus==="error" ? s.syncError :
-                    syncStatus==="synced" ? s.syncOk : s.syncBusy)
-              }}>
-                {syncStatus==="loading"||syncStatus==="syncing" ? "🔄 Syncing…" :
-                 syncStatus==="synced" ? "✓ Synced" : "⚠ Sync error"}
-              </div>
-            )}
           </div>
-          <div style={s.headerRight}>
+          {/* Counts centered, Extras pinned right */}
+          <div style={s.headerCountsRow}>
+            <div style={{flex:1}} />
             <div style={s.counters}>
               {MEAL_SLOTS.map(slot => {
                 const count = slotCounts[slot]; const full = count===7;
@@ -447,11 +452,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                 );
               })}
             </div>
-            <div style={s.headerActions}>
-              <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => { setShowClearConfirm(true); history.pushState({ overlay: "clearConfirm" }, ""); }} title="Clear week">
-                <span style={{fontSize:14}}>🗑</span>
-                <span style={s.clearWeekLabel}>Clear</span>
-              </button>
+            <div style={{flex:1,display:"flex",justifyContent:"flex-end"}}>
               <button style={s.extrasBtn} className="extras-btn" onClick={() => { if (!panelOpen) { setPanelOpen(true); history.pushState({ overlay: "panel" }, ""); } else { setPanelOpen(false); history.back(); } }}>
                 <span style={s.extrasBtnIcon}>🍪</span>
                 <span style={s.extrasBtnLabel}>Extras</span>
@@ -1049,7 +1050,10 @@ const s = {
   // Planner
   plannerRoot: { minHeight:"100%", background:"#1c1712" },
   header: { background:"linear-gradient(160deg,#2a2118,#1c1712)", borderBottom:"1px solid #3a2e22", padding:"20px 16px 14px", position:"sticky", top:0, zIndex:20, backdropFilter:"blur(12px)" },
-  headerInner: { display:"flex", justifyContent:"space-between", alignItems:"flex-start", maxWidth:960, margin:"0 auto", gap:12, flexWrap:"wrap" },
+  headerInner: { maxWidth:960, margin:"0 auto" },
+  headerTopBar: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 },
+  headerTitleBlock: { textAlign:"center", marginBottom:12 },
+  headerCountsRow: { display:"flex", alignItems:"flex-start" },
   eyebrow: { fontSize:11, letterSpacing:"0.15em", textTransform:"uppercase", color:"#a08060", marginBottom:3, fontFamily:"'DM Sans',sans-serif" },
   title: { margin:0, fontSize:"clamp(22px,5vw,34px)", fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.02em", lineHeight:1.1 },
   weekRange: { fontSize:12, color:"#9a7f60", marginTop:3, fontFamily:"'DM Sans',sans-serif" },
@@ -1057,7 +1061,6 @@ const s = {
   syncOk: { color:"#78c878" },
   syncBusy: { color:"#9a9a60" },
   syncError: { color:"#e07a5f" },
-  headerRight: { display:"flex", alignItems:"flex-start", gap:12 },
   counters: { display:"flex", gap:12, alignItems:"flex-start" },
   counterItem: { display:"flex", flexDirection:"column", gap:4, minWidth:72 },
   counterTop: { display:"flex", alignItems:"center", gap:4 },
@@ -1067,7 +1070,6 @@ const s = {
   counterOf: { fontSize:10, fontWeight:400, color:"#7a6448" },
   counterTrack: { height:3, background:"#3a2e22", borderRadius:2, overflow:"hidden" },
   counterFill: { height:"100%", borderRadius:2, transition:"width 0.35s ease" },
-  headerActions: { display:"flex", flexDirection:"column", gap:6 },
   clearWeekBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:5, transition:"border-color 0.2s,background 0.2s" },
   clearWeekLabel: { fontSize:10, color:"#9a7f60", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
   extrasBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:6, position:"relative", transition:"border-color 0.2s,background 0.2s" },
