@@ -336,13 +336,30 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const today = getTodayName();
 
+  const isRestoringRef = useRef(false);
+
+  useEffect(() => {
+    const onPopState = () => {
+      isRestoringRef.current = true;
+      if (modal) { setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false); }
+      else if (panelOpen) { setPanelOpen(false); }
+      isRestoringRef.current = false;
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [modal, panelOpen]);
+
   const openModal = (day, slot) => {
     const cur = week[day][slot];
     setModal({ day, slot }); setInputVal(cur.meal);
     setThawOn(cur.thaw); setThawDays(cur.thawDays);
     setCopyDays([]); setShowCopyTo(false);
+    history.pushState({ overlay: "modal" }, "");
   };
-  const closeModal = () => { setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false); };
+  const closeModal = () => {
+    setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false);
+    if (!isRestoringRef.current) history.back();
+  };
 
   const saveMeal = (val) => {
     if (!modal) return;
@@ -434,7 +451,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                 <span style={{fontSize:14}}>🗑</span>
                 <span style={s.clearWeekLabel}>Clear</span>
               </button>
-              <button style={s.extrasBtn} className="extras-btn" onClick={() => setPanelOpen(v=>!v)}>
+              <button style={s.extrasBtn} className="extras-btn" onClick={() => { if (!panelOpen) { setPanelOpen(true); history.pushState({ overlay: "panel" }, ""); } else { setPanelOpen(false); history.back(); } }}>
                 <span style={s.extrasBtnIcon}>🍪</span>
                 <span style={s.extrasBtnLabel}>Extras</span>
                 {extrasCount > 0 && <span style={s.extrasBadge}>{extrasCount}</span>}
@@ -525,11 +542,11 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       </main>
 
       {/* EXTRAS PANEL */}
-      <div style={{...s.backdrop,...(panelOpen?s.backdropVisible:{})}} onClick={()=>setPanelOpen(false)} />
+      <div style={{...s.backdrop,...(panelOpen?s.backdropVisible:{})}} onClick={()=>{ setPanelOpen(false); if (!isRestoringRef.current) history.back(); }} />
       <aside style={{...s.panel,...(panelOpen?s.panelOpen:{})}}>
         <div style={s.panelHeader}>
           <div style={s.panelTitle}>Weekly Extras</div>
-          <button style={s.panelClose} onClick={()=>setPanelOpen(false)}>✕</button>
+          <button style={s.panelClose} onClick={()=>{ setPanelOpen(false); if (!isRestoringRef.current) history.back(); }}>✕</button>
         </div>
         {[{label:"Snacks",color:"#b89ac8",items:snacks,setItems:setSnacks,input:snackInput,setInput:setSnackInput,sugOpen:snackSugOpen,setSugOpen:setSnackSugOpen,suggestions:SNACK_SUGGESTIONS,add:addSnack},{label:"Desserts",color:"#e8a0b4",items:desserts,setItems:setDesserts,input:dessertInput,setInput:setDessertInput,sugOpen:dessertSugOpen,setSugOpen:setDessertSugOpen,suggestions:DESSERT_SUGGESTIONS,add:addDessert}].map(bin => (
           <div key={bin.label} style={s.binCard}>
