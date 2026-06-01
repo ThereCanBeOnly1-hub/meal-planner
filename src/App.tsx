@@ -469,18 +469,23 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
           <div style={s.prepBannerInner}>
             <div style={s.prepBannerTitle}><span>🧊</span> This Week's Thaw Reminders</div>
             <div style={s.prepList}>
-              {thawItems.map((item,i) => (
-                <div key={i} style={s.prepItem}>
+              {thawItems.map((item,i) => {
+                const today = new Date(); today.setHours(0,0,0,0);
+                const thaw = new Date(item.thawDate); thaw.setHours(0,0,0,0);
+                const isToday = thaw.getTime() === today.getTime();
+                return (
+                <div key={i} style={{...s.prepItem,...(isToday?{background:"#3d1515",border:"1px solid #c0392b"}:{})}}>
                   <div style={s.prepItemLeft}>
                     <span style={s.prepMeal}>{item.mealName}</span>
                     <span style={s.prepMeta}>{item.day} · {item.slot}</span>
                   </div>
                   <div style={s.prepItemRight}>
-                    <span style={s.prepThawDate}>Thaw by {item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}</span>
+                    <span style={{...s.prepThawDate,...(isToday?s.prepThawDateUrgent:{})}}>{isToday ? "🚨 Thaw Today!" : `Thaw by ${item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}`}</span>
                     <button style={s.prepCalBtn} className="cal-btn" onClick={() => openCalendarEvent(item.mealName,item.slot,item.day,item.thawDays)}>📅 Add</button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         </div>
@@ -1053,7 +1058,7 @@ const s = {
   headerInner: { maxWidth:960, margin:"0 auto" },
   headerTopBar: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 },
   headerTitleBlock: { textAlign:"center", marginBottom:12 },
-  headerCountsRow: { display:"flex", alignItems:"flex-start" },
+  headerCountsRow: { display:"flex", alignItems:"flex-start", gap:16 },
   eyebrow: { fontSize:11, letterSpacing:"0.15em", textTransform:"uppercase", color:"#a08060", marginBottom:3, fontFamily:"'DM Sans',sans-serif" },
   title: { margin:0, fontSize:"clamp(22px,5vw,34px)", fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.02em", lineHeight:1.1 },
   weekRange: { fontSize:12, color:"#9a7f60", marginTop:3, fontFamily:"'DM Sans',sans-serif" },
@@ -1090,6 +1095,7 @@ const s = {
   prepMeta: { fontSize:11, color:"#5a8a80", fontFamily:"'DM Sans',sans-serif" },
   prepItemRight: { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
   prepThawDate: { fontSize:12, color:"#7ecfcf", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  prepThawDateUrgent: { color:"#fff", background:"#c0392b", borderRadius:6, padding:"2px 8px" },
   prepCalBtn: { background:"#2a3d38", border:"1px solid #3a5a52", borderRadius:6, padding:"4px 10px", fontSize:11, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
 
   main: { padding:"16px 12px 24px", maxWidth:960, margin:"0 auto" },
