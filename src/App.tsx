@@ -328,6 +328,8 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const [thawDays, setThawDays] = useState(2);
   const [copyDays, setCopyDays] = useState([]);
   const [showCopyTo, setShowCopyTo] = useState(false);
+  const [dayCopyDay, setDayCopyDay] = useState(null);
+  const [dayCopyTargets, setDayCopyTargets] = useState([]);
   const [snackInput, setSnackInput] = useState("");
   const [dessertInput, setDessertInput] = useState("");
   const [snackSugOpen, setSnackSugOpen] = useState(false);
@@ -385,6 +387,23 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); history.back(); };
 
   const toggleCopyDay = (di) => setCopyDays(prev => prev.includes(di)?prev.filter(x=>x!==di):[...prev,di]);
+
+  const applyDayCopy = (srcDay) => {
+    setWeek(prev => {
+      const next = { ...prev };
+      dayCopyTargets.forEach(di => {
+        const d = DAYS[di];
+        next[d] = { ...next[d] };
+        MEAL_SLOTS.forEach(slot => {
+          const src = prev[srcDay][slot];
+          if (src.meal) next[d][slot] = { meal: src.meal, thaw: false, thawDays: 2, recipeId: src.recipeId };
+        });
+      });
+      return next;
+    });
+    setDayCopyDay(null);
+    setDayCopyTargets([]);
+  };
   const addSnack = (v) => { v=v.trim(); if(!v)return; setSnacks(p=>[...p,v]); setSnackInput(""); setSnackSugOpen(false); };
   const addDessert = (v) => { v=v.trim(); if(!v)return; setDesserts(p=>[...p,v]); setDessertInput(""); setDessertSugOpen(false); };
 
@@ -497,6 +516,8 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
           {DAYS.map(day => {
             const isToday = day===today;
             const hasThaw = MEAL_SLOTS.some(sl=>week[day][sl].meal&&week[day][sl].thaw);
+            const hasMeals = MEAL_SLOTS.some(sl=>week[day][sl].meal);
+            const isDayCopying = dayCopyDay===day;
             return (
               <div key={day} style={{...s.card,...(isToday?s.cardToday:{}),...(hasThaw?s.cardThaw:{})}} className="day-card">
                 <div style={s.cardHead}>
@@ -504,8 +525,28 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                   <div style={s.cardBadges}>
                     {hasThaw && <span style={s.thawBadge}>🧊</span>}
                     {isToday && <span style={s.todayBadge}>Today</span>}
+                    {hasMeals && (
+                      <button style={{...s.dayCopyBtn,...(isDayCopying?s.dayCopyBtnActive:{})}} className="day-copy-btn"
+                        onClick={e=>{e.stopPropagation(); setDayCopyDay(isDayCopying?null:day); setDayCopyTargets([]);}}>⎘</button>
+                    )}
                   </div>
                 </div>
+                {isDayCopying && (
+                  <div style={s.dayCopyPicker} onClick={e=>e.stopPropagation()}>
+                    <div style={s.copyPickerLbl}>Copy all meals to:</div>
+                    <div style={s.copyDaysRow}>
+                      {DAY_ABBR.map((abbr,di) => {
+                        const isSrc=DAYS[di]===day; const isSel=dayCopyTargets.includes(di);
+                        return <button key={di} disabled={isSrc} style={{...s.dayChip,...(isSrc?s.dayChipSource:{}),...(isSel?s.dayChipSelected:{})}} className={isSrc?"":"day-chip"} onClick={()=>!isSrc&&setDayCopyTargets(prev=>prev.includes(di)?prev.filter(x=>x!==di):[...prev,di])}>{abbr}</button>;
+                      })}
+                    </div>
+                    {dayCopyTargets.length>0 && (
+                      <button style={s.dayCopyApplyBtn} onClick={()=>applyDayCopy(day)}>
+                        Copy to {dayCopyTargets.length} day{dayCopyTargets.length>1?"s":""}
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div style={s.slots}>
                   {MEAL_SLOTS.map(slot => {
                     const entry = week[day][slot]; const val = entry.meal;
@@ -1188,6 +1229,10 @@ const s = {
   dayChipSource: { background:"#2e2418", border:"1.5px solid #f4c97a88", color:"#f4c97a", cursor:"default" },
   dayChipSelected: { background:"#3d3020", border:"1.5px solid #c8a878", color:"#f4e4c4" },
   copyPreview: { fontSize:11, color:"#89c4a1", marginTop:7, fontFamily:"'DM Sans',sans-serif" },
+  dayCopyBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:5, padding:"2px 7px", fontSize:12, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4 },
+  dayCopyBtnActive: { borderColor:"#c8a878", color:"#c8a878", background:"#2e2418" },
+  dayCopyPicker: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:8, padding:"10px", margin:"6px 0 4px" },
+  dayCopyApplyBtn: { marginTop:8, width:"100%", background:"linear-gradient(135deg,#c8a878,#a07848)", border:"none", borderRadius:7, padding:"7px", fontSize:12, color:"#1c1712", fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
 
   modalActions: { display:"flex", gap:8, justifyContent:"flex-end", marginTop:6 },
   btnClear: { background:"none", border:"1px solid #4a3c2a", borderRadius:10, padding:"11px 18px", color:"#9a7f60", fontSize:14, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
