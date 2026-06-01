@@ -537,7 +537,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                     <div style={s.copyDaysRow}>
                       {DAY_ABBR.map((abbr,di) => {
                         const isSrc=DAYS[di]===day; const isSel=dayCopyTargets.includes(di);
-                        return <button key={di} disabled={isSrc} style={{...s.dayChip,...(isSrc?s.dayChipSource:{}),...(isSel?s.dayChipSelected:{})}} className={isSrc?"":"day-chip"} onClick={()=>!isSrc&&setDayCopyTargets(prev=>prev.includes(di)?prev.filter(x=>x!==di):[...prev,di])}>{abbr}</button>;
+                        return <button key={di} disabled={isSrc} style={{...s.dayChip,...(isSrc?s.dayChipSource:{}),...(isSel?s.dayChipSelected:{})}} className={isSrc?"":`day-chip${isSel?" day-chip-sel":""}`} onClick={()=>!isSrc&&setDayCopyTargets(prev=>prev.includes(di)?prev.filter(x=>x!==di):[...prev,di])}>{abbr}</button>;
                       })}
                     </div>
                     {dayCopyTargets.length>0 && (
@@ -723,7 +723,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                     <div style={s.copyDaysRow}>
                       {DAY_ABBR.map((abbr,di)=>{
                         const isSrc=DAYS[di]===modal.day; const isSel=copyDays.includes(di);
-                        return <button key={di} disabled={isSrc} style={{...s.dayChip,...(isSrc?s.dayChipSource:{}),...(isSel?s.dayChipSelected:{})}} className={isSrc?"":"day-chip"} onClick={()=>!isSrc&&toggleCopyDay(di)}>{abbr}</button>;
+                        return <button key={di} disabled={isSrc} style={{...s.dayChip,...(isSrc?s.dayChipSource:{}),...(isSel?s.dayChipSelected:{})}} className={isSrc?"":`day-chip${isSel?" day-chip-sel":""}`} onClick={()=>!isSrc&&toggleCopyDay(di)}>{abbr}</button>;
                       })}
                     </div>
                     {copyDays.length>0 && <div style={s.copyPreview}>→ {copyDays.map(di=>DAYS[di]).join(", ")}</div>}
@@ -1360,6 +1360,7 @@ const css = `
   .extras-btn:hover, .clear-week-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
   .day-chip:hover { background: #2e2418 !important; border-color: #9a7f60 !important; color: #f4e4c4 !important; }
+  .day-chip.day-chip-sel, .day-chip.day-chip-sel:hover { background: #3d3020 !important; border-color: #c8a878 !important; color: #f4e4c4 !important; }
   .thaw-toggle:hover { color: #7ecfcf !important; }
   .thaw-day-btn:hover { background: #1f3530 !important; border-color: #4a8a80 !important; color: #9ecfcf !important; }
   .cal-btn:hover { background: #2a5048 !important; }
