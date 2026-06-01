@@ -38,22 +38,19 @@ const getDateForDay = (dayName) => {
 
 const getTodayName = () => ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
 
-const icsDate = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
 
-const downloadIcs = (mealName, slot, dayName, thawDays) => {
+const openCalendarEvent = (mealName, slot, dayName, thawDays) => {
   const mealDate = getDateForDay(dayName);
   const thawDate = new Date(mealDate); thawDate.setDate(mealDate.getDate()-thawDays);
   const thawDateEnd = new Date(thawDate); thawDateEnd.setDate(thawDate.getDate()+1);
-  const summary = `Thaw: ${mealName} (${dayName} ${slot})`;
-  const ics = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//MealPlanner//EN","METHOD:PUBLISH","BEGIN:VEVENT",
-    `UID:thaw-${Date.now()}@mealplanner`,`DTSTART;VALUE=DATE:${icsDate(thawDate)}`,
-    `DTEND;VALUE=DATE:${icsDate(thawDateEnd)}`,`SUMMARY:${summary}`,
-    `DESCRIPTION:Thaw ${thawDays} day(s) before ${dayName}'s ${slot}`,
-    "BEGIN:VALARM","TRIGGER:-PT9H","ACTION:DISPLAY",`DESCRIPTION:${summary}`,"END:VALARM","END:VEVENT","END:VCALENDAR"].join("\r\n");
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([ics],{type:"text/calendar;charset=utf-8"}));
-  a.download = `thaw-${mealName.replace(/\s+/g,"-").toLowerCase()}.ics`;
-  a.click();
+  const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: `Thaw: ${mealName}`,
+    dates: `${fmt(thawDate)}/${fmt(thawDateEnd)}`,
+    details: `Thaw ${thawDays} day(s) before ${dayName}'s ${slot}`,
+  });
+  window.open(`https://calendar.google.com/calendar/render?${params.toString()}`, "_blank");
 };
 
 const scaleAmount = (amount, baseServings, currentServings) => {
@@ -435,7 +432,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                   </div>
                   <div style={s.prepItemRight}>
                     <span style={s.prepThawDate}>Thaw by {item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}</span>
-                    <button style={s.prepCalBtn} className="cal-btn" onClick={() => downloadIcs(item.mealName,item.slot,item.day,item.thawDays)}>📅 Add</button>
+                    <button style={s.prepCalBtn} className="cal-btn" onClick={() => openCalendarEvent(item.mealName,item.slot,item.day,item.thawDays)}>📅 Add</button>
                   </div>
                 </div>
               ))}
@@ -616,7 +613,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                       ))}
                     </div>
                     <div style={s.thawPreview}>↳ Thaw by {(()=>{const d=getDateForDay(modal.day);d.setDate(d.getDate()-thawDays);return d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});})()}</div>
-                    <button style={s.thawCalBtn} className="cal-btn" onClick={()=>downloadIcs(inputVal.trim(),modal.slot,modal.day,thawDays)}>📅 Add thaw reminder to calendar</button>
+                    <button style={s.thawCalBtn} className="cal-btn" onClick={()=>openCalendarEvent(inputVal.trim(),modal.slot,modal.day,thawDays)}>📅 Add thaw reminder to calendar</button>
                   </div>
                 )}
               </div>
