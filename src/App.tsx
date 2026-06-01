@@ -43,10 +43,11 @@ const icsDate = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")
 const downloadIcs = (mealName, slot, dayName, thawDays) => {
   const mealDate = getDateForDay(dayName);
   const thawDate = new Date(mealDate); thawDate.setDate(mealDate.getDate()-thawDays);
-  const summary = `🧊 Thaw: ${mealName} (${dayName} ${slot})`;
-  const ics = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//MealPlanner//EN","BEGIN:VEVENT",
+  const thawDateEnd = new Date(thawDate); thawDateEnd.setDate(thawDate.getDate()+1);
+  const summary = `Thaw: ${mealName} (${dayName} ${slot})`;
+  const ics = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//MealPlanner//EN","METHOD:PUBLISH","BEGIN:VEVENT",
     `UID:thaw-${Date.now()}@mealplanner`,`DTSTART;VALUE=DATE:${icsDate(thawDate)}`,
-    `DTEND;VALUE=DATE:${icsDate(thawDate)}`,`SUMMARY:${summary}`,
+    `DTEND;VALUE=DATE:${icsDate(thawDateEnd)}`,`SUMMARY:${summary}`,
     `DESCRIPTION:Thaw ${thawDays} day(s) before ${dayName}'s ${slot}`,
     "BEGIN:VALARM","TRIGGER:-PT9H","ACTION:DISPLAY",`DESCRIPTION:${summary}`,"END:VALARM","END:VEVENT","END:VCALENDAR"].join("\r\n");
   const a = document.createElement("a");
