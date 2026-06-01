@@ -460,11 +460,6 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
             </div>
           </div>
         </div>
-        <div style={s.legend}>
-          {MEAL_SLOTS.map(sl => <span key={sl} style={s.legendItem}><span style={{...s.dot,background:slotColors[sl]}} />{sl}</span>)}
-          <span style={s.legendItem}><span style={{...s.dot,background:"#7ecfcf",borderRadius:2}} />Needs thaw</span>
-          <span style={s.legendItem}><span style={{...s.dot,background:"#a088c8",borderRadius:2}} />Has recipe</span>
-        </div>
       </header>
 
       {/* THAW BANNER */}
