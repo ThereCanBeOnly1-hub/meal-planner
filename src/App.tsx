@@ -1058,7 +1058,7 @@ const s = {
   slotHasRecipe: { borderColor:"#4a3878" },
   slotInner: { flex:1, minWidth:0, overflow:"hidden" },
   slotLbl: { display:"block", fontSize:9, color:"#7a6448", letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
-  slotMeal: { display:"block", fontSize:12, color:"#f0e0c0", fontWeight:500, marginTop:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  slotMeal: { display:"inline", fontSize:12, color:"#f0e0c0", fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
   slotPlaceholder: { display:"block", fontSize:11, color:"#5a4a36", marginTop:1, fontFamily:"'DM Sans',sans-serif" },
   slotIcons: { display:"flex", gap:3, alignItems:"center", flexShrink:0, marginLeft:"auto" },
   slotThawIcon: { fontSize:10 },
@@ -1149,7 +1149,7 @@ const s = {
   activeFilterLbl: { flex:1, fontSize:11, color:"#78c878", fontFamily:"'DM Sans',sans-serif" },
   activeFilterClear: { background:"none", border:"none", fontSize:11, color:"#5a8a50", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textDecoration:"underline" },
   typeChipDietActive: { background:"#1e3a1e", border:"1.5px solid #4a8a4a", color:"#78c878" },
-  slotRecipeBtn: { display:"inline-flex", alignItems:"center", gap:4, marginTop:4, background:"#2a1e40", border:"1px solid #5a3888", borderRadius:5, fontSize:10, cursor:"pointer", padding:"3px 7px", color:"#d4b8f8", fontFamily:"'DM Sans',sans-serif", fontWeight:700, lineHeight:1 },
+  slotRecipeBtn: { display:"inline-flex", alignItems:"center", gap:4, background:"#2a1e40", border:"1px solid #5a3888", borderRadius:5, fontSize:10, cursor:"pointer", padding:"3px 7px", color:"#d4b8f8", fontFamily:"'DM Sans',sans-serif", fontWeight:700, lineHeight:1 },
 
   recipeEmpty: { textAlign:"center", padding:"60px 20px", display:"flex", flexDirection:"column", alignItems:"center", gap:10 },
   recipeEmptyIcon: { fontSize:40, marginBottom:4 },
