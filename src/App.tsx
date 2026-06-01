@@ -124,8 +124,39 @@ export default function App() {
   const isLoadingRef = useRef(false);
   const mealTimer = useRef(null);
   const extrasTimer = useRef(null);
+  const recipesRef = useRef(recipes);
+  const isRestoringRef = useRef(false);
+
+  useEffect(() => { recipesRef.current = recipes; }, [recipes]);
+
+  const navigate = (newTab: string, newView: any) => {
+    setTab(newTab);
+    setRecipeView(newView);
+    if (!isRestoringRef.current) {
+      history.pushState({ tab: newTab, recipeId: newView?.recipe?.id ?? null, recipeEdit: newView?.edit ?? false }, "");
+    }
+  };
 
   // Load on mount + poll every 20s
+  useEffect(() => {
+    history.replaceState({ tab: "planner", recipeId: null, recipeEdit: false }, "");
+    const onPopState = (e: PopStateEvent) => {
+      if (!e.state) return;
+      const { tab: t, recipeId, recipeEdit } = e.state;
+      isRestoringRef.current = true;
+      setTab(t);
+      if (recipeId) {
+        const recipe = recipesRef.current.find(r => r.id === recipeId);
+        setRecipeView(recipe ? { recipe, edit: recipeEdit } : null);
+      } else {
+        setRecipeView(null);
+      }
+      isRestoringRef.current = false;
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   useEffect(() => {
     if (!isConfigured) return;
     loadAll();
@@ -226,7 +257,7 @@ export default function App() {
       const exists = prev.find(r => r.id === recipe.id);
       return exists ? prev.map(r => r.id === recipe.id ? recipe : r) : [...prev, recipe];
     });
-    setRecipeView({ recipe });
+    navigate("recipes", { recipe });
     if (isConfigured) {
       try {
         await sb.upsert("recipes", [{
@@ -243,7 +274,7 @@ export default function App() {
 
   const deleteRecipe = async (id) => {
     setRecipes(prev => prev.filter(r => r.id !== id));
-    setRecipeView(null);
+    navigate("recipes", null);
     if (isConfigured) {
       try {
         await sb.del("recipes", `id=eq.${id}`);
@@ -266,20 +297,20 @@ export default function App() {
             syncStatus={syncStatus}
             onViewRecipe={(name) => {
               const r = recipes.find(r => r.name.toLowerCase() === name.toLowerCase());
-              if (r) { setRecipeView({ recipe: r }); setTab("recipes"); }
+              if (r) navigate("recipes", { recipe: r });
             }} />
         )}
         {tab === "recipes" && (
-          <RecipesView recipes={recipes} view={recipeView} setView={setRecipeView}
+          <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
             onSave={saveRecipe} onDelete={deleteRecipe} />
         )}
       </div>
       <nav style={s.bottomNav}>
-        <button style={{ ...s.navBtn, ...(tab==="planner"?s.navBtnActive:{}) }} onClick={() => setTab("planner")}>
+        <button style={{ ...s.navBtn, ...(tab==="planner"?s.navBtnActive:{}) }} onClick={() => navigate("planner", null)}>
           <span style={s.navIcon}>📅</span>
           <span style={s.navLabel}>Planner</span>
         </button>
-        <button style={{ ...s.navBtn, ...(tab==="recipes"?s.navBtnActive:{}) }} onClick={() => setTab("recipes")}>
+        <button style={{ ...s.navBtn, ...(tab==="recipes"?s.navBtnActive:{}) }} onClick={() => navigate("recipes", null)}>
           <span style={s.navIcon}>📖</span>
           <span style={s.navLabel}>Recipes</span>
           {recipes.length > 0 && <span style={s.navBadge}>{recipes.length}</span>}
