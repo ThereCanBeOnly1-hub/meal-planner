@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { useState, useEffect, useRef } from "react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -91,8 +90,9 @@ const sb = {
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
-  async upsert(table, data) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+  async upsert(table, data, onConflict = "") {
+    const q = onConflict ? `?on_conflict=${onConflict}` : "";
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${q}`, {
       method: "POST",
       headers: { ...this.h(), "Prefer": "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify(Array.isArray(data) ? data : [data]),
@@ -204,7 +204,7 @@ export default function App() {
           thaw_days: e.thawDays || 2, recipe_id: e.recipeId || null,
           updated_at: new Date().toISOString() });
       }));
-      await sb.upsert("meals", rows);
+      await sb.upsert("meals", rows, "week_start,day,slot");
       setSyncStatus("synced");
     } catch (err) { console.error("Sync meals:", err); setSyncStatus("error"); }
   };
