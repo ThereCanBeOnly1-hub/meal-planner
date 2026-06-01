@@ -1,122 +1,1281 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState, useEffect, useRef } from "react";
 
-function App() {
-  const [count, setCount] = useState(0)
+// ─── Constants ────────────────────────────────────────────────────────────────
+const DAYS = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+const DAY_ABBR = ["M","Tu","W","Th","F","Sa","Su"];
+const MEAL_SLOTS = ["Breakfast","Lunch","Dinner"];
+const slotColors = { Breakfast:"#f4c97a", Lunch:"#89c4a1", Dinner:"#e07a5f" };
+
+const DIET_TAGS = ["Gluten-Free","Dairy-Free","Low Sodium","Low Carb","Vegetarian","Vegan","Nut-Free","High Protein"];
+const MEAL_TYPE_TAGS = ["Breakfast","Lunch","Dinner","Snack","Dessert"];
+
+const SNACK_SUGGESTIONS = ["Apple & PB","Cheese & Crackers","Trail Mix","Yogurt","Hummus & Veggies","Granola Bar","Popcorn","String Cheese","Rice Cakes","Fruit Salad"];
+const DESSERT_SUGGESTIONS = ["Ice Cream","Brownies","Cookies","Fruit Sorbet","Pudding","Cheesecake","Apple Pie","Chocolate Mousse","Gelato","Cupcakes"];
+const FALLBACK_SUGGESTIONS = ["Spaghetti Bolognese","Tacos","Grilled Chicken","Stir Fry","Pizza Night","Salmon & Veggies","Burgers","Soup & Bread","Steak Night","Pasta Primavera","Fish Tacos","BBQ Ribs","Chicken Alfredo","Veggie Curry","Breakfast Burritos","Pancakes","French Toast","Omelette","Avocado Toast","Smoothie Bowl","BLT Sandwich","Caesar Salad","Pho","Ramen","Mac & Cheese"];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const initialWeek = () => {
+  const w = {};
+  DAYS.forEach(d => { w[d] = {}; MEAL_SLOTS.forEach(sl => { w[d][sl] = { meal:"", thaw:false, thawDays:2 }; }); });
+  return w;
+};
+
+const getWeekRange = () => {
+  const now = new Date(); const dow = now.getDay();
+  const mon = new Date(now); mon.setDate(now.getDate() - (dow===0?6:dow-1));
+  const sun = new Date(mon); sun.setDate(mon.getDate()+6);
+  const fmt = d => d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+  return `${fmt(mon)} – ${fmt(sun)}`;
+};
+
+const getDateForDay = (dayName) => {
+  const now = new Date(); const dow = now.getDay();
+  const mon = new Date(now); mon.setDate(now.getDate()-(dow===0?6:dow-1));
+  const d = new Date(mon); d.setDate(mon.getDate()+DAYS.indexOf(dayName));
+  return d;
+};
+
+const getTodayName = () => ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
+
+const icsDate = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
+
+const downloadIcs = (mealName, slot, dayName, thawDays) => {
+  const mealDate = getDateForDay(dayName);
+  const thawDate = new Date(mealDate); thawDate.setDate(mealDate.getDate()-thawDays);
+  const summary = `🧊 Thaw: ${mealName} (${dayName} ${slot})`;
+  const ics = ["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//MealPlanner//EN","BEGIN:VEVENT",
+    `UID:thaw-${Date.now()}@mealplanner`,`DTSTART;VALUE=DATE:${icsDate(thawDate)}`,
+    `DTEND;VALUE=DATE:${icsDate(thawDate)}`,`SUMMARY:${summary}`,
+    `DESCRIPTION:Thaw ${thawDays} day(s) before ${dayName}'s ${slot}`,
+    "BEGIN:VALARM","TRIGGER:-PT9H","ACTION:DISPLAY",`DESCRIPTION:${summary}`,"END:VALARM","END:VEVENT","END:VCALENDAR"].join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([ics],{type:"text/calendar;charset=utf-8"}));
+  a.download = `thaw-${mealName.replace(/\s+/g,"-").toLowerCase()}.ics`;
+  a.click();
+};
+
+const scaleAmount = (amount, baseServings, currentServings) => {
+  const scaled = (amount / baseServings) * currentServings;
+  if (scaled === Math.floor(scaled)) return String(scaled);
+  const rounded = Math.round(scaled * 8) / 8;
+  const whole = Math.floor(rounded);
+  const frac = rounded - whole;
+  const fracMap = { 0.125:"⅛", 0.25:"¼", 0.375:"⅜", 0.5:"½", 0.625:"⅝", 0.75:"¾", 0.875:"⅞" };
+  if (whole === 0) return fracMap[frac] || rounded.toFixed(2);
+  return frac === 0 ? String(whole) : `${whole}${fracMap[frac]||""}`;
+};
+
+const newRecipe = () => ({
+  id: Date.now().toString(),
+  name: "", description: "", url: "",
+  prepTime: "", cookTime: "", baseServings: 4,
+  ingredients: [{ id: Date.now().toString(), amount: "", unit: "", name: "" }],
+  steps: [{ id: Date.now().toString(), text: "" }],
+  mealTypes: [], dietTags: [],
+});
+
+// ─── Supabase Config ─────────────────────────────────────────────────────────
+const SUPABASE_URL = "https://gniejhtptibpfvunwoih.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImduaWVqaHRwdGlicGZ2dW53b2loIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzQyMTMsImV4cCI6MjA5NTkxMDIxM30.uWvKv41wUaXKiO7gkBVExA5Mjm7O-UcWhY8bMGt0_0c";
+const isConfigured = !SUPABASE_URL.includes("PASTE");
+
+const sb = {
+  h: () => ({
+    "apikey": SUPABASE_KEY,
+    "Authorization": `Bearer ${SUPABASE_KEY}`,
+    "Content-Type": "application/json",
+  }),
+  async get(table, query = "") {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, { headers: this.h() });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async upsert(table, data) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+      method: "POST",
+      headers: { ...this.h(), "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(Array.isArray(data) ? data : [data]),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  },
+  async del(table, query) {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+      method: "DELETE", headers: this.h(),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  },
+};
+
+const weekStart = () => {
+  const now = new Date(); const dow = now.getDay();
+  const mon = new Date(now); mon.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1));
+  return mon.toISOString().split("T")[0];
+};
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+export default function App() {
+  const [tab, setTab] = useState("planner");
+  const [recipes, setRecipes] = useState([]);
+  const [recipeView, setRecipeView] = useState(null);
+  const [week, setWeek] = useState(initialWeek());
+  const [snacks, setSnacks] = useState([]);
+  const [desserts, setDesserts] = useState([]);
+  const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
+  const isLoadingRef = useRef(false);
+  const mealTimer = useRef(null);
+  const extrasTimer = useRef(null);
+
+  // Load on mount + poll every 20s
+  useEffect(() => {
+    if (!isConfigured) return;
+    loadAll();
+    const id = setInterval(loadAll, 20000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Sync meals to DB when week changes (debounced 600ms)
+  useEffect(() => {
+    if (isLoadingRef.current || !isConfigured) return;
+    clearTimeout(mealTimer.current);
+    mealTimer.current = setTimeout(() => syncMeals(week), 600);
+  }, [week]);
+
+  // Sync extras to DB when snacks/desserts change (debounced 600ms)
+  useEffect(() => {
+    if (isLoadingRef.current || !isConfigured) return;
+    clearTimeout(extrasTimer.current);
+    extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 600);
+  }, [snacks, desserts]);
+
+  const loadAll = async () => {
+    try {
+      isLoadingRef.current = true;
+      setSyncStatus("syncing");
+      const ws = weekStart();
+
+      const [mealsRows, recipeRows, extrasRows] = await Promise.all([
+        sb.get("meals", `?week_start=eq.${ws}`),
+        sb.get("recipes", "?order=created_at.asc"),
+        sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
+      ]);
+
+      const newWeek = initialWeek();
+      mealsRows.forEach(row => {
+        if (newWeek[row.day]?.[row.slot] !== undefined) {
+          newWeek[row.day][row.slot] = {
+            meal: row.meal_name || "",
+            thaw: row.thaw || false,
+            thawDays: row.thaw_days || 2,
+            recipeId: row.recipe_id || null,
+          };
+        }
+      });
+      setWeek(newWeek);
+
+      setRecipes(recipeRows.map(r => ({
+        id: r.id, name: r.name, description: r.description || "",
+        url: r.url || "", prepTime: r.prep_time || "", cookTime: r.cook_time || "",
+        baseServings: r.base_servings || 4,
+        mealTypes: r.meal_types || [], dietTags: r.diet_tags || [],
+        ingredients: r.ingredients || [], steps: r.steps || [],
+      })));
+
+      setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
+      setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
+
+      setSyncStatus("synced");
+    } catch (err) {
+      console.error("Load error:", err);
+      setSyncStatus("error");
+    } finally {
+      isLoadingRef.current = false;
+    }
+  };
+
+  const syncMeals = async (weekData) => {
+    try {
+      const ws = weekStart();
+      const rows = [];
+      DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
+        const e = weekData[day][slot];
+        rows.push({ week_start: ws, day, slot,
+          meal_name: e.meal || "", thaw: e.thaw || false,
+          thaw_days: e.thawDays || 2, recipe_id: e.recipeId || null,
+          updated_at: new Date().toISOString() });
+      }));
+      await sb.upsert("meals", rows);
+      setSyncStatus("synced");
+    } catch (err) { console.error("Sync meals:", err); setSyncStatus("error"); }
+  };
+
+  const syncExtras = async (snackList, dessertList) => {
+    try {
+      const ws = weekStart();
+      await sb.del("extras", `week_start=eq.${ws}`);
+      const rows = [
+        ...snackList.map(name => ({ week_start: ws, type: "snack", name })),
+        ...dessertList.map(name => ({ week_start: ws, type: "dessert", name })),
+      ];
+      if (rows.length > 0) await sb.upsert("extras", rows);
+      setSyncStatus("synced");
+    } catch (err) { console.error("Sync extras:", err); setSyncStatus("error"); }
+  };
+
+  const saveRecipe = async (recipe) => {
+    setRecipes(prev => {
+      const exists = prev.find(r => r.id === recipe.id);
+      return exists ? prev.map(r => r.id === recipe.id ? recipe : r) : [...prev, recipe];
+    });
+    setRecipeView({ recipe });
+    if (isConfigured) {
+      try {
+        await sb.upsert("recipes", [{
+          id: recipe.id, name: recipe.name, description: recipe.description,
+          url: recipe.url, prep_time: recipe.prepTime, cook_time: recipe.cookTime,
+          base_servings: recipe.baseServings, meal_types: recipe.mealTypes,
+          diet_tags: recipe.dietTags, ingredients: recipe.ingredients,
+          steps: recipe.steps, updated_at: new Date().toISOString(),
+        }]);
+        setSyncStatus("synced");
+      } catch (err) { console.error("Save recipe:", err); setSyncStatus("error"); }
+    }
+  };
+
+  const deleteRecipe = async (id) => {
+    setRecipes(prev => prev.filter(r => r.id !== id));
+    setRecipeView(null);
+    if (isConfigured) {
+      try {
+        await sb.del("recipes", `id=eq.${id}`);
+        setSyncStatus("synced");
+      } catch (err) { console.error("Delete recipe:", err); setSyncStatus("error"); }
+    }
+  };
+
+  const recipesBySlot = (slot) => recipes.filter(r => r.mealTypes.includes(slot)).map(r => r.name);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
+    <div style={s.appRoot}>
+      <style>{css}</style>
+      <div style={s.appBody}>
+        {tab === "planner" && (
+          <PlannerView recipesBySlot={recipesBySlot} recipes={recipes}
+            week={week} setWeek={setWeek}
+            snacks={snacks} setSnacks={setSnacks}
+            desserts={desserts} setDesserts={setDesserts}
+            syncStatus={syncStatus}
+            onViewRecipe={(name) => {
+              const r = recipes.find(r => r.name.toLowerCase() === name.toLowerCase());
+              if (r) { setRecipeView({ recipe: r }); setTab("recipes"); }
+            }} />
+        )}
+        {tab === "recipes" && (
+          <RecipesView recipes={recipes} view={recipeView} setView={setRecipeView}
+            onSave={saveRecipe} onDelete={deleteRecipe} />
+        )}
+      </div>
+      <nav style={s.bottomNav}>
+        <button style={{ ...s.navBtn, ...(tab==="planner"?s.navBtnActive:{}) }} onClick={() => setTab("planner")}>
+          <span style={s.navIcon}>📅</span>
+          <span style={s.navLabel}>Planner</span>
         </button>
-      </section>
-
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+        <button style={{ ...s.navBtn, ...(tab==="recipes"?s.navBtnActive:{}) }} onClick={() => setTab("recipes")}>
+          <span style={s.navIcon}>📖</span>
+          <span style={s.navLabel}>Recipes</span>
+          {recipes.length > 0 && <span style={s.navBadge}>{recipes.length}</span>}
+        </button>
+      </nav>
+    </div>
+  );
 }
 
-export default App
+// ─── Planner View ─────────────────────────────────────────────────────────────
+function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus }) {
+  const [modal, setModal] = useState(null);
+  const [inputVal, setInputVal] = useState("");
+  const [thawOn, setThawOn] = useState(false);
+  const [thawDays, setThawDays] = useState(2);
+  const [copyDays, setCopyDays] = useState([]);
+  const [showCopyTo, setShowCopyTo] = useState(false);
+  const [snackInput, setSnackInput] = useState("");
+  const [dessertInput, setDessertInput] = useState("");
+  const [snackSugOpen, setSnackSugOpen] = useState(false);
+  const [dessertSugOpen, setDessertSugOpen] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const today = getTodayName();
+
+  const openModal = (day, slot) => {
+    const cur = week[day][slot];
+    setModal({ day, slot }); setInputVal(cur.meal);
+    setThawOn(cur.thaw); setThawDays(cur.thawDays);
+    setCopyDays([]); setShowCopyTo(false);
+  };
+  const closeModal = () => { setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false); };
+
+  const saveMeal = (val) => {
+    if (!modal) return;
+    const matchedRecipe = val ? recipes.find(r => r.name.toLowerCase() === val.trim().toLowerCase()) : null;
+    const entry = { meal: val, thaw: val ? thawOn : false, thawDays, recipeId: matchedRecipe ? matchedRecipe.id : null };
+    setWeek(prev => {
+      const next = { ...prev, [modal.day]: { ...prev[modal.day], [modal.slot]: entry } };
+      if (copyDays.length > 0) copyDays.forEach(di => {
+        const d = DAYS[di];
+        if (d !== modal.day) next[d] = { ...next[d], [modal.slot]: { meal: val, thaw: false, thawDays: 2, recipeId: matchedRecipe ? matchedRecipe.id : null } };
+      });
+      return next;
+    });
+    closeModal();
+  };
+
+  const clearMeal = (day, slot, e) => {
+    e.stopPropagation();
+    setWeek(prev => ({ ...prev, [day]: { ...prev[day], [slot]: { meal:"", thaw:false, thawDays:2, recipeId:null } } }));
+  };
+
+  const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); };
+
+  const toggleCopyDay = (di) => setCopyDays(prev => prev.includes(di)?prev.filter(x=>x!==di):[...prev,di]);
+  const addSnack = (v) => { v=v.trim(); if(!v)return; setSnacks(p=>[...p,v]); setSnackInput(""); setSnackSugOpen(false); };
+  const addDessert = (v) => { v=v.trim(); if(!v)return; setDesserts(p=>[...p,v]); setDessertInput(""); setDessertSugOpen(false); };
+
+  // Suggestions: recipe library first, then fallbacks
+  const getSuggestions = (slot, query) => {
+    const libNames = recipesBySlot(slot);
+    const all = [...new Set([...libNames, ...FALLBACK_SUGGESTIONS])];
+    if (!query) return all.slice(0, 8);
+    return all.filter(m => m.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
+  };
+
+  const slotCounts = MEAL_SLOTS.reduce((acc, slot) => { acc[slot] = Object.values(week).filter(d=>d[slot].meal).length; return acc; }, {});
+  const extrasCount = snacks.length + desserts.length;
+
+  const thawItems = [];
+  DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
+    const e = week[day][slot];
+    if (e.meal && e.thaw) {
+      const md = getDateForDay(day); const td = new Date(md); td.setDate(md.getDate()-e.thawDays);
+      thawItems.push({ mealName:e.meal, slot, day, thawDays:e.thawDays, thawDate:td });
+    }
+  }));
+  thawItems.sort((a,b) => a.thawDate-b.thawDate);
+
+
+
+  return (
+    <div style={s.plannerRoot}>
+      {/* HEADER */}
+      <header style={s.header}>
+        <div style={s.headerInner}>
+          <div>
+            <div style={s.eyebrow}>Weekly Meal Planner</div>
+            <h1 style={s.title}>What's Cooking?</h1>
+            <div style={s.weekRange}>{getWeekRange()}</div>
+            {syncStatus && syncStatus !== "unconfigured" && (
+              <div style={{
+                ...s.syncIndicator,
+                ...(syncStatus==="error" ? s.syncError :
+                    syncStatus==="synced" ? s.syncOk : s.syncBusy)
+              }}>
+                {syncStatus==="loading"||syncStatus==="syncing" ? "🔄 Syncing…" :
+                 syncStatus==="synced" ? "✓ Synced" : "⚠ Sync error"}
+              </div>
+            )}
+          </div>
+          <div style={s.headerRight}>
+            <div style={s.counters}>
+              {MEAL_SLOTS.map(slot => {
+                const count = slotCounts[slot]; const full = count===7;
+                return (
+                  <div key={slot} style={s.counterItem}>
+                    <div style={s.counterTop}>
+                      <span style={{...s.dot,background:slotColors[slot]}} />
+                      <span style={s.counterLabel}>{slot}</span>
+                      <span style={{...s.counterFrac,...(full?s.counterFracFull:{})}}>{count}<span style={s.counterOf}>/7</span></span>
+                    </div>
+                    <div style={s.counterTrack}><div style={{...s.counterFill,background:slotColors[slot],width:`${(count/7)*100}%`,opacity:full?1:0.7}} /></div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={s.headerActions}>
+              <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => setShowClearConfirm(true)} title="Clear week">
+                <span style={{fontSize:14}}>🗑</span>
+                <span style={s.clearWeekLabel}>Clear</span>
+              </button>
+              <button style={s.extrasBtn} className="extras-btn" onClick={() => setPanelOpen(v=>!v)}>
+                <span style={s.extrasBtnIcon}>🍪</span>
+                <span style={s.extrasBtnLabel}>Extras</span>
+                {extrasCount > 0 && <span style={s.extrasBadge}>{extrasCount}</span>}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div style={s.legend}>
+          {MEAL_SLOTS.map(sl => <span key={sl} style={s.legendItem}><span style={{...s.dot,background:slotColors[sl]}} />{sl}</span>)}
+          <span style={s.legendItem}><span style={{...s.dot,background:"#7ecfcf",borderRadius:2}} />Needs thaw</span>
+          <span style={s.legendItem}><span style={{...s.dot,background:"#a088c8",borderRadius:2}} />Has recipe</span>
+        </div>
+      </header>
+
+      {/* THAW BANNER */}
+      {thawItems.length > 0 && (
+        <div style={s.prepBanner}>
+          <div style={s.prepBannerInner}>
+            <div style={s.prepBannerTitle}><span>🧊</span> This Week's Thaw Reminders</div>
+            <div style={s.prepList}>
+              {thawItems.map((item,i) => (
+                <div key={i} style={s.prepItem}>
+                  <div style={s.prepItemLeft}>
+                    <span style={s.prepMeal}>{item.mealName}</span>
+                    <span style={s.prepMeta}>{item.day} · {item.slot}</span>
+                  </div>
+                  <div style={s.prepItemRight}>
+                    <span style={s.prepThawDate}>Thaw by {item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}</span>
+                    <button style={s.prepCalBtn} className="cal-btn" onClick={() => downloadIcs(item.mealName,item.slot,item.day,item.thawDays)}>📅 Add</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* GRID */}
+      <main style={s.main}>
+        <div style={s.grid}>
+          {DAYS.map(day => {
+            const isToday = day===today;
+            const hasThaw = MEAL_SLOTS.some(sl=>week[day][sl].meal&&week[day][sl].thaw);
+            return (
+              <div key={day} style={{...s.card,...(isToday?s.cardToday:{}),...(hasThaw?s.cardThaw:{})}} className="day-card">
+                <div style={s.cardHead}>
+                  <span style={{...s.dayName,...(isToday?s.dayNameToday:{})}}>{day.slice(0,3).toUpperCase()}</span>
+                  <div style={s.cardBadges}>
+                    {hasThaw && <span style={s.thawBadge}>🧊</span>}
+                    {isToday && <span style={s.todayBadge}>Today</span>}
+                  </div>
+                </div>
+                <div style={s.slots}>
+                  {MEAL_SLOTS.map(slot => {
+                    const entry = week[day][slot]; const val = entry.meal;
+                    const linkedRecipeForCard = entry.recipeId ? recipes.find(r => r.id === entry.recipeId) : null;
+                    const hasLinkedRecipe = !!linkedRecipeForCard;
+                    return (
+                      <div key={slot}
+                        style={{...s.slot,...(val?s.slotFilled:s.slotEmpty),...(val&&entry.thaw?s.slotThaw:{}),...(linkedRecipeForCard?s.slotHasRecipe:{})}}
+                        className="meal-slot" onClick={() => openModal(day,slot)}
+                      >
+                        <span style={{...s.dot,background:slotColors[slot],flexShrink:0,marginTop:2,alignSelf:"flex-start"}} />
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{display:"flex",alignItems:"center",gap:4}}>
+                            <span style={s.slotLbl}>{slot}</span>
+                            {val&&entry.thaw && <span style={{fontSize:9}}>🧊</span>}
+                          </div>
+                          {val ? <span style={s.slotMeal}>{val}</span> : <span style={s.slotPlaceholder}>+ Add</span>}
+                          {linkedRecipeForCard && (
+                            <button style={s.slotRecipeBtn} className="slot-recipe-btn"
+                              onClick={e=>{e.stopPropagation(); onViewRecipe(linkedRecipeForCard.name);}}>
+                              📖 <span style={{fontSize:10,fontWeight:700}}>View Recipe</span>
+                            </button>
+                          )}
+                        </div>
+                        {val && <button className="clear-btn" style={s.clearBtn} onClick={(e)=>clearMeal(day,slot,e)}>✕</button>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </main>
+
+      {/* EXTRAS PANEL */}
+      <div style={{...s.backdrop,...(panelOpen?s.backdropVisible:{})}} onClick={()=>setPanelOpen(false)} />
+      <aside style={{...s.panel,...(panelOpen?s.panelOpen:{})}}>
+        <div style={s.panelHeader}>
+          <div style={s.panelTitle}>Weekly Extras</div>
+          <button style={s.panelClose} onClick={()=>setPanelOpen(false)}>✕</button>
+        </div>
+        {[{label:"Snacks",color:"#b89ac8",items:snacks,setItems:setSnacks,input:snackInput,setInput:setSnackInput,sugOpen:snackSugOpen,setSugOpen:setSnackSugOpen,suggestions:SNACK_SUGGESTIONS,add:addSnack},{label:"Desserts",color:"#e8a0b4",items:desserts,setItems:setDesserts,input:dessertInput,setInput:setDessertInput,sugOpen:dessertSugOpen,setSugOpen:setDessertSugOpen,suggestions:DESSERT_SUGGESTIONS,add:addDessert}].map(bin => (
+          <div key={bin.label} style={s.binCard}>
+            <div style={s.binHeader}><span style={{...s.dot,background:bin.color}} /><span style={s.binLabel}>{bin.label}</span><span style={s.binCount}>{bin.items.length}</span></div>
+            <div style={s.binItems}>
+              {bin.items.length===0 && <div style={s.binEmpty}>Nothing added yet</div>}
+              {bin.items.map((item,i) => (
+                <div key={i} style={s.binItem} className="bin-item">
+                  <span style={s.binItemText}>{item}</span>
+                  <button style={s.binRemove} className="bin-remove" onClick={()=>bin.setItems(p=>p.filter((_,j)=>j!==i))}>✕</button>
+                </div>
+              ))}
+            </div>
+            <div style={s.binInputRow}>
+              <input style={s.binInput} placeholder={`Add a ${bin.label.toLowerCase().slice(0,-1)}…`} value={bin.input}
+                onChange={e=>{bin.setInput(e.target.value);bin.setSugOpen(e.target.value.length>0);}}
+                onKeyDown={e=>{if(e.key==="Enter")bin.add(bin.input);}} />
+              <button style={s.binAdd} className="bin-add-btn" onClick={()=>bin.add(bin.input)}>+</button>
+            </div>
+            {bin.sugOpen && (
+              <div style={s.binSugs}>
+                {bin.suggestions.filter(sg=>sg.toLowerCase().includes(bin.input.toLowerCase())).slice(0,5).map(sg=>(
+                  <button key={sg} style={chips.small} className="chip" onClick={()=>bin.add(sg)}>{sg}</button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </aside>
+
+      {/* CLEAR WEEK CONFIRM */}
+      {showClearConfirm && (
+        <div style={s.overlay} onClick={()=>setShowClearConfirm(false)}>
+          <div style={{...s.modal,maxWidth:320,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
+            <div style={{fontSize:32,marginBottom:12}}>🗑</div>
+            <div style={{...s.modalTitle,fontSize:18,marginBottom:8}}>Clear the week?</div>
+            <div style={{fontSize:13,color:"#9a7f60",marginBottom:24,fontFamily:"'DM Sans',sans-serif"}}>This will remove all meals from every day. Can't be undone.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <button style={s.btnClear} onClick={()=>setShowClearConfirm(false)}>Cancel</button>
+              <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={clearWeek}>Clear Week</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MEAL MODAL */}
+      {modal && (
+        <div style={s.overlay} onClick={closeModal}>
+          <div style={s.modal} onClick={e=>e.stopPropagation()} className="modal-in">
+            <div style={s.modalHead}>
+              <div>
+                <div style={s.modalEyebrow}><span style={{...s.dot,background:slotColors[modal.slot],marginRight:6}} />{modal.slot} · {modal.day}</div>
+                <div style={s.modalTitle}>What's on the menu?</div>
+              </div>
+              <button style={s.modalClose} onClick={closeModal}>✕</button>
+            </div>
+
+            <input style={s.modalInput} placeholder="Type a meal name…" value={inputVal} autoFocus
+              onChange={e=>setInputVal(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&inputVal.trim())saveMeal(inputVal.trim());}} />
+
+            {/* View recipe link — computed inline so it's always fresh */}
+            {(() => {
+              const slotEntry = modal ? week[modal.day][modal.slot] : null;
+              const byId = slotEntry?.recipeId ? recipes.find(r => r.id === slotEntry.recipeId) : null;
+              const byName = inputVal.trim() ? recipes.find(r => r.name.toLowerCase() === inputVal.trim().toLowerCase()) : null;
+              const linked = byId || byName;
+              if (!linked) return null;
+              return (
+                <div style={s.viewRecipeRow}>
+                  <span style={s.viewRecipeIcon}>📖</span>
+                  <span style={s.viewRecipeName}>{linked.name}</span>
+                  <button style={s.viewRecipeBtn} className="view-recipe-btn"
+                    onClick={() => { closeModal(); onViewRecipe(linked.name); }}>
+                    View Recipe →
+                  </button>
+                </div>
+              );
+            })()}
+
+            {/* Suggestions */}
+            <div style={s.sugs}>
+              <div style={s.sugsLbl}>{inputVal.length>0?"Suggestions":"Quick picks"}</div>
+              <div style={s.sugsList}>
+                {getSuggestions(modal.slot, inputVal.length>0?inputVal:"").map(m => {
+                  const isFromLib = recipes.some(r=>r.name.toLowerCase()===m.toLowerCase());
+                  return (
+                    <button key={m} style={{...chips.normal,...(isFromLib?chips.recipeChip:{})}} className="chip" onClick={()=>setInputVal(m)}>
+                      {isFromLib && <span style={{marginRight:4,fontSize:10}}>📖</span>}{m}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Thaw */}
+            {inputVal.trim() && (
+              <div style={s.thawSection}>
+                <div style={s.thawRow}>
+                  <button style={{...s.thawToggle,...(thawOn?s.thawToggleOn:{})}} className="thaw-toggle" onClick={()=>setThawOn(v=>!v)}>
+                    <span style={s.thawToggleIcon}>🧊</span>
+                    <span>Needs thaw</span>
+                    <span style={{...s.thawTogglePill,...(thawOn?s.thawTogglePillOn:{})}}>{thawOn?"ON":"OFF"}</span>
+                  </button>
+                </div>
+                {thawOn && (
+                  <div style={s.thawOptions}>
+                    <span style={s.thawOptionsLbl}>Thaw how many days before?</span>
+                    <div style={s.thawDayBtns}>
+                      {[1,2,3].map(n=>(
+                        <button key={n} style={{...s.thawDayBtn,...(thawDays===n?s.thawDayBtnActive:{})}} className="thaw-day-btn" onClick={()=>setThawDays(n)}>{n} day{n>1?"s":""}</button>
+                      ))}
+                    </div>
+                    <div style={s.thawPreview}>↳ Thaw by {(()=>{const d=getDateForDay(modal.day);d.setDate(d.getDate()-thawDays);return d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});})()}</div>
+                    <button style={s.thawCalBtn} className="cal-btn" onClick={()=>downloadIcs(inputVal.trim(),modal.slot,modal.day,thawDays)}>📅 Add thaw reminder to calendar</button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Copy to */}
+            {inputVal.trim() && (
+              <div style={s.copySection}>
+                <button style={{...s.copyToggle,...(showCopyTo?s.copyToggleActive:{})}} onClick={()=>setShowCopyTo(v=>!v)}>
+                  <span>⎘</span> Copy to other days
+                  {copyDays.length>0 && <span style={s.copyBadge}>{copyDays.length}</span>}
+                </button>
+                {showCopyTo && (
+                  <div style={s.copyPicker}>
+                    <div style={s.copyPickerLbl}>Select days to also set {modal.slot.toLowerCase()}:</div>
+                    <div style={s.copyDaysRow}>
+                      {DAY_ABBR.map((abbr,di)=>{
+                        const isSrc=DAYS[di]===modal.day; const isSel=copyDays.includes(di);
+                        return <button key={di} disabled={isSrc} style={{...s.dayChip,...(isSrc?s.dayChipSource:{}),...(isSel?s.dayChipSelected:{})}} className={isSrc?"":"day-chip"} onClick={()=>!isSrc&&toggleCopyDay(di)}>{abbr}</button>;
+                      })}
+                    </div>
+                    {copyDays.length>0 && <div style={s.copyPreview}>→ {copyDays.map(di=>DAYS[di]).join(", ")}</div>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div style={s.modalActions}>
+              {week[modal.day][modal.slot].meal && <button style={s.btnClear} onClick={()=>saveMeal("")}>Clear</button>}
+              <button style={{...s.btnSave,...(!inputVal.trim()?s.btnDisabled:{})}} onClick={()=>inputVal.trim()&&saveMeal(inputVal.trim())}>
+                {copyDays.length>0?`Save & Copy (${copyDays.length+1})`:"Save"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Recipes View ─────────────────────────────────────────────────────────────
+function RecipesView({ recipes, view, setView, onSave, onDelete }) {
+  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} />;
+  if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} />;
+  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} />;
+}
+
+// ─── Recipe Grid ──────────────────────────────────────────────────────────────
+function RecipeGrid({ recipes, onNew, onSelect }) {
+  const [filter, setFilter] = useState("");
+  const [activeFilters, setActiveFilters] = useState(new Set());
+
+  const toggleFilter = (tag) => setActiveFilters(prev => {
+    const next = new Set(prev);
+    next.has(tag) ? next.delete(tag) : next.add(tag);
+    return next;
+  });
+  const clearFilters = () => setActiveFilters(new Set());
+
+  const filtered = recipes.filter(r => {
+    const matchName = r.name.toLowerCase().includes(filter.toLowerCase());
+    if (activeFilters.size === 0) return matchName;
+    // All active filters must match (AND logic) - check across both tag types
+    const allTags = [...r.mealTypes, ...r.dietTags];
+    const matchTags = [...activeFilters].every(f => allTags.includes(f));
+    return matchName && matchTags;
+  });
+
+  return (
+    <div style={s.recipesRoot}>
+      <div style={s.recipesHeader}>
+        <div>
+          <div style={s.eyebrow}>Recipe Library</div>
+          <h1 style={s.title}>Your Recipes</h1>
+        </div>
+        <button style={s.newRecipeBtn} className="new-recipe-btn" onClick={onNew}>+ New</button>
+      </div>
+
+      <div style={s.recipeFilters}>
+        <input style={s.recipeSearch} placeholder="🔍  Search recipes…" value={filter} onChange={e=>setFilter(e.target.value)} />
+        <div style={s.typeFilters}>
+          <button style={{...s.typeChip,...(activeFilters.size===0?s.typeChipActive:{})}} className="type-chip" onClick={clearFilters}>All</button>
+          {MEAL_TYPE_TAGS.map(t => (
+            <button key={t} style={{...s.typeChip,...(activeFilters.has(t)?s.typeChipActive:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>
+          ))}
+        </div>
+        <div style={{...s.typeFilters, marginTop:6}}>
+          {DIET_TAGS.map(t => (
+            <button key={t} style={{...s.typeChip,...s.typeChipDiet,...(activeFilters.has(t)?s.typeChipDietActive:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>
+          ))}
+        </div>
+        {activeFilters.size > 0 && (
+          <div style={s.activeFilterRow}>
+            <span style={s.activeFilterLbl}>{activeFilters.size} filter{activeFilters.size>1?"s":""} active</span>
+            <button style={s.activeFilterClear} className="clear-filter-btn" onClick={clearFilters}>Clear all</button>
+          </div>
+        )}
+      </div>
+
+      {recipes.length === 0 ? (
+        <div style={s.recipeEmpty}>
+          <div style={s.recipeEmptyIcon}>📖</div>
+          <div style={s.recipeEmptyTitle}>No recipes yet</div>
+          <div style={s.recipeEmptyText}>Add your first recipe and it'll show up as a suggestion in the planner.</div>
+          <button style={s.btnSave} onClick={onNew}>Add First Recipe</button>
+        </div>
+      ) : filtered.length === 0 ? (
+        <div style={s.recipeEmpty}>
+          <div style={s.recipeEmptyIcon}>🔍</div>
+          <div style={s.recipeEmptyTitle}>No matches</div>
+          <div style={s.recipeEmptyText}>Try a different search or filter.</div>
+        </div>
+      ) : (
+        <div style={s.recipeGrid}>
+          {filtered.map(r => (
+            <button key={r.id} style={s.recipeCard} className="recipe-card" onClick={()=>onSelect(r)}>
+              <div style={s.recipeCardTop}>
+                <div style={s.recipeCardName}>{r.name}</div>
+                {(r.prepTime||r.cookTime) && (
+                  <div style={s.recipeCardTimes}>
+                    {r.prepTime && <span style={s.recipeTime}>⏱ {r.prepTime} prep</span>}
+                    {r.cookTime && <span style={s.recipeTime}>🔥 {r.cookTime} cook</span>}
+                  </div>
+                )}
+                {r.description && <div style={s.recipeCardDesc}>{r.description}</div>}
+              </div>
+              <div style={s.recipeCardBottom}>
+                <div style={s.recipeCardTags}>
+                  {r.mealTypes.map(t=><span key={t} style={{...s.tag,...s.tagMeal}}>{t}</span>)}
+                  {r.dietTags.slice(0,2).map(t=><span key={t} style={{...s.tag,...s.tagDiet}}>{t}</span>)}
+                  {r.dietTags.length>2 && <span style={{...s.tag,...s.tagDiet}}>+{r.dietTags.length-2}</span>}
+                </div>
+                {r.url && <span style={s.recipeCardLink}>🔗</span>}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Recipe Detail ────────────────────────────────────────────────────────────
+function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
+  const [servings, setServings] = useState(recipe.baseServings || 4);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  return (
+    <div style={s.recipeDetailRoot}>
+      {/* Top bar */}
+      <div style={s.detailTopBar}>
+        <button style={s.detailBackBtn} className="back-btn" onClick={onBack}>← Recipes</button>
+        <div style={s.detailTopActions}>
+          <button style={s.detailEditBtn} className="detail-edit-btn" onClick={onEdit}>Edit</button>
+          <button style={s.detailDeleteBtn} className="detail-delete-btn" onClick={()=>setShowDeleteConfirm(true)}>Delete</button>
+        </div>
+      </div>
+
+      <div style={s.detailBody}>
+        {/* Name + meta */}
+        <h1 style={s.detailTitle}>{recipe.name}</h1>
+        {recipe.description && <p style={s.detailDesc}>{recipe.description}</p>}
+
+        <div style={s.detailMeta}>
+          {recipe.prepTime && <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>⏱</span><div><div style={s.detailMetaVal}>{recipe.prepTime}</div><div style={s.detailMetaLbl}>Prep</div></div></div>}
+          {recipe.cookTime && <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>🔥</span><div><div style={s.detailMetaVal}>{recipe.cookTime}</div><div style={s.detailMetaLbl}>Cook</div></div></div>}
+          <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>🍽</span><div><div style={s.detailMetaVal}>{recipe.baseServings}</div><div style={s.detailMetaLbl}>Serves</div></div></div>
+        </div>
+
+        {/* Tags */}
+        {(recipe.mealTypes.length>0||recipe.dietTags.length>0) && (
+          <div style={s.detailTags}>
+            {recipe.mealTypes.map(t=><span key={t} style={{...s.tag,...s.tagMeal}}>{t}</span>)}
+            {recipe.dietTags.map(t=><span key={t} style={{...s.tag,...s.tagDiet}}>{t}</span>)}
+          </div>
+        )}
+
+        {/* URL */}
+        {recipe.url && (
+          <a href={recipe.url} target="_blank" rel="noopener noreferrer" style={s.detailUrl}>🔗 View original recipe</a>
+        )}
+
+        {/* Serving scaler */}
+        {recipe.ingredients.length>0 && recipe.ingredients.some(i=>i.name) && (
+          <div style={s.detailSection}>
+            <div style={s.detailSectionHead}>
+              <div style={s.detailSectionTitle}>Ingredients</div>
+              <div style={s.scalerRow}>
+                <button style={s.scalerBtn} className="scaler-btn" onClick={()=>setServings(v=>Math.max(1,v-1))}>−</button>
+                <span style={s.scalerVal}>{servings} <span style={s.scalerLbl}>serving{servings!==1?"s":""}</span></span>
+                <button style={s.scalerBtn} className="scaler-btn" onClick={()=>setServings(v=>v+1)}>+</button>
+              </div>
+            </div>
+            <div style={s.ingredientList}>
+              {recipe.ingredients.filter(i=>i.name).map(ing => {
+                const scaledAmt = ing.amount ? scaleAmount(parseFloat(ing.amount)||0, recipe.baseServings, servings) : "";
+                return (
+                  <div key={ing.id} style={s.ingredientRow}>
+                    <span style={s.ingredientDot} />
+                    <span style={s.ingredientAmt}>{scaledAmt} {ing.unit}</span>
+                    <span style={s.ingredientName}>{ing.name}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Steps */}
+        {recipe.steps.length>0 && recipe.steps.some(st=>st.text) && (
+          <div style={s.detailSection}>
+            <div style={s.detailSectionTitle}>Instructions</div>
+            <div style={s.stepList}>
+              {recipe.steps.filter(st=>st.text).map((step,i) => (
+                <div key={step.id} style={s.stepRow}>
+                  <div style={s.stepNum}>{i+1}</div>
+                  <div style={s.stepText}>{step.text}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Delete confirm */}
+      {showDeleteConfirm && (
+        <div style={s.overlay} onClick={()=>setShowDeleteConfirm(false)}>
+          <div style={{...s.modal,maxWidth:300,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
+            <div style={{fontSize:28,marginBottom:10}}>🗑</div>
+            <div style={{...s.modalTitle,fontSize:17,marginBottom:6}}>Delete recipe?</div>
+            <div style={{fontSize:12,color:"#9a7f60",marginBottom:20,fontFamily:"'DM Sans',sans-serif"}}>"{recipe.name}" will be permanently removed.</div>
+            <div style={{display:"flex",gap:8,justifyContent:"center"}}>
+              <button style={s.btnClear} onClick={()=>setShowDeleteConfirm(false)}>Cancel</button>
+              <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={()=>onDelete(recipe.id)}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Recipe Editor ────────────────────────────────────────────────────────────
+function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
+  const [r, setR] = useState(initialRecipe);
+  const set = (key, val) => setR(prev => ({...prev, [key]: val}));
+
+  const addIngredient = () => set("ingredients", [...r.ingredients, {id:Date.now().toString(),amount:"",unit:"",name:""}]);
+  const removeIngredient = (id) => set("ingredients", r.ingredients.filter(i=>i.id!==id));
+  const updateIngredient = (id, key, val) => set("ingredients", r.ingredients.map(i=>i.id===id?{...i,[key]:val}:i));
+
+  const addStep = () => set("steps", [...r.steps, {id:Date.now().toString(),text:""}]);
+  const removeStep = (id) => set("steps", r.steps.filter(st=>st.id!==id));
+  const updateStep = (id, val) => set("steps", r.steps.map(st=>st.id===id?{...st,text:val}:st));
+
+  const toggleMealType = (t) => set("mealTypes", r.mealTypes.includes(t)?r.mealTypes.filter(x=>x!==t):[...r.mealTypes,t]);
+  const toggleDietTag = (t) => set("dietTags", r.dietTags.includes(t)?r.dietTags.filter(x=>x!==t):[...r.dietTags,t]);
+
+  const canSave = r.name.trim().length > 0;
+
+  return (
+    <div style={s.editorRoot}>
+      <div style={s.editorTopBar}>
+        <button style={s.detailBackBtn} className="back-btn" onClick={onCancel}>✕ Cancel</button>
+        <div style={s.eyebrow}>{initialRecipe.name ? "Edit Recipe" : "New Recipe"}</div>
+        <button style={{...s.btnSave,...(!canSave?s.btnDisabled:{}),...s.editorSaveBtn}} onClick={()=>canSave&&onSave(r)}>Save</button>
+      </div>
+
+      <div style={s.editorBody}>
+        {/* Name */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Recipe Name *</label>
+          <input style={s.editorInput} placeholder="e.g. Grilled Chicken" value={r.name} onChange={e=>set("name",e.target.value)} />
+        </div>
+
+        {/* Description */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Description</label>
+          <textarea style={s.editorTextarea} placeholder="A short description…" value={r.description} onChange={e=>set("description",e.target.value)} rows={2} />
+        </div>
+
+        {/* URL */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Recipe URL (optional)</label>
+          <input style={s.editorInput} placeholder="https://…" value={r.url} onChange={e=>set("url",e.target.value)} />
+        </div>
+
+        {/* Times + servings */}
+        <div style={s.editorRow}>
+          <div style={{...s.editorField,flex:1}}>
+            <label style={s.editorLabel}>Prep Time</label>
+            <input style={s.editorInput} placeholder="e.g. 15 min" value={r.prepTime} onChange={e=>set("prepTime",e.target.value)} />
+          </div>
+          <div style={{...s.editorField,flex:1}}>
+            <label style={s.editorLabel}>Cook Time</label>
+            <input style={s.editorInput} placeholder="e.g. 30 min" value={r.cookTime} onChange={e=>set("cookTime",e.target.value)} />
+          </div>
+          <div style={{...s.editorField,width:90,flexShrink:0}}>
+            <label style={s.editorLabel}>Serves</label>
+            <div style={s.servingsRow}>
+              <button style={s.scalerBtn} className="scaler-btn" onClick={()=>set("baseServings",Math.max(1,r.baseServings-1))}>−</button>
+              <span style={{...s.scalerVal,fontSize:15}}>{r.baseServings}</span>
+              <button style={s.scalerBtn} className="scaler-btn" onClick={()=>set("baseServings",r.baseServings+1)}>+</button>
+            </div>
+          </div>
+        </div>
+
+        {/* Meal Types */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Meal Type</label>
+          <div style={s.tagPicker}>
+            {MEAL_TYPE_TAGS.map(t=>(
+              <button key={t} style={{...s.tagPickerChip,...(r.mealTypes.includes(t)?s.tagPickerChipOn:{})}} className="tag-chip" onClick={()=>toggleMealType(t)}>{t}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Diet Tags */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Dietary Tags</label>
+          <div style={s.tagPicker}>
+            {DIET_TAGS.map(t=>(
+              <button key={t} style={{...s.tagPickerChip,...(r.dietTags.includes(t)?s.tagPickerDietOn:{})}} className="tag-chip" onClick={()=>toggleDietTag(t)}>{t}</button>
+            ))}
+          </div>
+        </div>
+
+        {/* Ingredients */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Ingredients</label>
+          <div style={s.ingredientEditor}>
+            {r.ingredients.map((ing,i) => (
+              <div key={ing.id} style={s.ingredientEditorRow}>
+                <input style={{...s.editorInput,...s.ingAmtInput}} placeholder="Amt" value={ing.amount} onChange={e=>updateIngredient(ing.id,"amount",e.target.value)} />
+                <input style={{...s.editorInput,...s.ingUnitInput}} placeholder="Unit" value={ing.unit} onChange={e=>updateIngredient(ing.id,"unit",e.target.value)} />
+                <input style={{...s.editorInput,flex:1}} placeholder="Ingredient name" value={ing.name} onChange={e=>updateIngredient(ing.id,"name",e.target.value)} />
+                {r.ingredients.length>1 && <button style={s.editorRemoveBtn} className="editor-remove-btn" onClick={()=>removeIngredient(ing.id)}>✕</button>}
+              </div>
+            ))}
+            <button style={s.editorAddRowBtn} className="editor-add-btn" onClick={addIngredient}>+ Add ingredient</button>
+          </div>
+        </div>
+
+        {/* Steps */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Instructions</label>
+          <div style={s.stepEditor}>
+            {r.steps.map((step,i) => (
+              <div key={step.id} style={s.stepEditorRow}>
+                <div style={s.stepEditorNum}>{i+1}</div>
+                <textarea style={{...s.editorTextarea,flex:1,marginBottom:0}} placeholder={`Step ${i+1}…`} value={step.text} onChange={e=>updateStep(step.id,e.target.value)} rows={2} />
+                {r.steps.length>1 && <button style={s.editorRemoveBtn} className="editor-remove-btn" onClick={()=>removeStep(step.id)}>✕</button>}
+              </div>
+            ))}
+            <button style={s.editorAddRowBtn} className="editor-add-btn" onClick={addStep}>+ Add step</button>
+          </div>
+        </div>
+
+        <div style={{height:40}} />
+      </div>
+    </div>
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+const BASE = { fontFamily:"'DM Sans',sans-serif" };
+const s = {
+  // App shell
+  appRoot: { minHeight:"100vh", background:"#1c1712", fontFamily:"'Lora',Georgia,serif", color:"#f0e8d8", display:"flex", flexDirection:"column", overflowX:"hidden" },
+  appBody: { flex:1, overflowY:"auto", paddingBottom:64 },
+
+  // Bottom nav
+  bottomNav: { position:"fixed", bottom:0, left:0, right:0, background:"#221a12", borderTop:"1px solid #3a2e22", display:"flex", zIndex:50, height:60 },
+  navBtn: { flex:1, background:"none", border:"none", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, cursor:"pointer", color:"#7a6448", position:"relative", transition:"color 0.15s" },
+  navBtnActive: { color:"#f4c97a" },
+  navIcon: { fontSize:20, lineHeight:1 },
+  navLabel: { fontSize:10, fontWeight:700, letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
+  navBadge: { position:"absolute", top:6, right:"calc(50% - 16px)", background:"#e07a5f", color:"#fff", borderRadius:10, padding:"1px 5px", fontSize:9, fontWeight:700, fontFamily:"'DM Sans',sans-serif" },
+
+  // Planner
+  plannerRoot: { minHeight:"100%", background:"#1c1712" },
+  header: { background:"linear-gradient(160deg,#2a2118,#1c1712)", borderBottom:"1px solid #3a2e22", padding:"20px 16px 14px", position:"sticky", top:0, zIndex:20, backdropFilter:"blur(12px)" },
+  headerInner: { display:"flex", justifyContent:"space-between", alignItems:"flex-start", maxWidth:960, margin:"0 auto", gap:12, flexWrap:"wrap" },
+  eyebrow: { fontSize:11, letterSpacing:"0.15em", textTransform:"uppercase", color:"#a08060", marginBottom:3, fontFamily:"'DM Sans',sans-serif" },
+  title: { margin:0, fontSize:"clamp(22px,5vw,34px)", fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.02em", lineHeight:1.1 },
+  weekRange: { fontSize:12, color:"#9a7f60", marginTop:3, fontFamily:"'DM Sans',sans-serif" },
+  syncIndicator: { fontSize:10, marginTop:3, fontFamily:"'DM Sans',sans-serif", letterSpacing:"0.04em" },
+  syncOk: { color:"#78c878" },
+  syncBusy: { color:"#9a9a60" },
+  syncError: { color:"#e07a5f" },
+  headerRight: { display:"flex", alignItems:"flex-start", gap:12 },
+  counters: { display:"flex", gap:12, alignItems:"flex-start" },
+  counterItem: { display:"flex", flexDirection:"column", gap:4, minWidth:72 },
+  counterTop: { display:"flex", alignItems:"center", gap:4 },
+  counterLabel: { fontSize:10, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", flex:1 },
+  counterFrac: { fontSize:14, fontWeight:700, color:"#c8a878", fontFamily:"'DM Sans',sans-serif", lineHeight:1 },
+  counterFracFull: { color:"#89c4a1" },
+  counterOf: { fontSize:10, fontWeight:400, color:"#7a6448" },
+  counterTrack: { height:3, background:"#3a2e22", borderRadius:2, overflow:"hidden" },
+  counterFill: { height:"100%", borderRadius:2, transition:"width 0.35s ease" },
+  headerActions: { display:"flex", flexDirection:"column", gap:6 },
+  clearWeekBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:5, transition:"border-color 0.2s,background 0.2s" },
+  clearWeekLabel: { fontSize:10, color:"#9a7f60", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
+  extrasBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:6, position:"relative", transition:"border-color 0.2s,background 0.2s" },
+  extrasBtnIcon: { fontSize:16, lineHeight:1 },
+  extrasBtnLabel: { fontSize:10, color:"#9a7f60", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
+  extrasBadge: { position:"absolute", top:-5, right:-5, background:"#e07a5f", color:"#fff", borderRadius:10, padding:"1px 5px", fontSize:9, fontWeight:700, fontFamily:"'DM Sans',sans-serif" },
+  legend: { display:"flex", gap:12, marginTop:12, maxWidth:960, margin:"12px auto 0", flexWrap:"wrap" },
+  legendItem: { display:"flex", alignItems:"center", gap:5, fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
+  dot: { width:7, height:7, borderRadius:"50%", display:"inline-block" },
+
+  prepBanner: { background:"#1a2420", borderBottom:"1px solid #2a3d38", padding:"0 16px" },
+  prepBannerInner: { maxWidth:960, margin:"0 auto", padding:"12px 0" },
+  prepBannerTitle: { fontSize:11, fontWeight:700, color:"#7ecfcf", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", marginBottom:8, display:"flex", alignItems:"center", gap:5 },
+  prepList: { display:"flex", flexDirection:"column", gap:6 },
+  prepItem: { display:"flex", alignItems:"center", justifyContent:"space-between", background:"#1f2e2a", border:"1px solid #2a3d38", borderRadius:9, padding:"9px 12px", gap:10, flexWrap:"wrap" },
+  prepItemLeft: { display:"flex", flexDirection:"column", gap:2 },
+  prepMeal: { fontSize:13, fontWeight:600, color:"#cceee8", fontFamily:"'DM Sans',sans-serif" },
+  prepMeta: { fontSize:11, color:"#5a8a80", fontFamily:"'DM Sans',sans-serif" },
+  prepItemRight: { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
+  prepThawDate: { fontSize:12, color:"#7ecfcf", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  prepCalBtn: { background:"#2a3d38", border:"1px solid #3a5a52", borderRadius:6, padding:"4px 10px", fontSize:11, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+
+  main: { padding:"16px 12px 24px", maxWidth:960, margin:"0 auto" },
+  grid: { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(220px,1fr))", gap:10 },
+  card: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:14, padding:"13px 11px", transition:"border-color 0.2s,transform 0.15s" },
+  cardToday: { border:"1.5px solid #f4c97a66", background:"#2a2118" },
+  cardThaw: { },
+  cardHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:9 },
+  cardBadges: { display:"flex", alignItems:"center", gap:4 },
+  dayName: { fontSize:12, fontWeight:700, letterSpacing:"0.1em", color:"#c8a878", fontFamily:"'DM Sans',sans-serif" },
+  dayNameToday: { color:"#f4c97a" },
+  thawBadge: { fontSize:12 },
+  todayBadge: { fontSize:10, background:"#f4c97a22", color:"#f4c97a", border:"1px solid #f4c97a55", borderRadius:10, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif" },
+  slots: { display:"flex", flexDirection:"column", gap:5 },
+  slot: { display:"flex", alignItems:"center", gap:6, padding:"8px 9px", borderRadius:8, cursor:"pointer", transition:"background 0.15s", position:"relative" },
+  slotEmpty: { background:"#1c1712", border:"1px dashed #3a2e22" },
+  slotFilled: { background:"#2e2418", border:"1px solid #4a3c2a" },
+  slotThaw: { background:"#1a2c28", border:"1px solid #2e5048" },
+  slotHasRecipe: { borderColor:"#4a3878" },
+  slotInner: { flex:1, minWidth:0, overflow:"hidden" },
+  slotLbl: { display:"block", fontSize:9, color:"#7a6448", letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
+  slotMeal: { display:"block", fontSize:12, color:"#f0e0c0", fontWeight:500, marginTop:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  slotPlaceholder: { display:"block", fontSize:11, color:"#5a4a36", marginTop:1, fontFamily:"'DM Sans',sans-serif" },
+  slotIcons: { display:"flex", gap:3, alignItems:"center", flexShrink:0, marginLeft:"auto" },
+  slotThawIcon: { fontSize:10 },
+  slotRecipeIcon: { fontSize:10 },
+  clearBtn: { background:"rgba(28,23,18,0.85)", border:"none", color:"#9a6858", fontSize:10, cursor:"pointer", padding:"2px 5px", borderRadius:4, position:"absolute", top:4, right:4, opacity:0, transition:"opacity 0.15s,color 0.15s", lineHeight:1, zIndex:2 },
+
+  backdrop: { position:"fixed", inset:0, background:"rgba(12,10,8,0)", zIndex:29, pointerEvents:"none", transition:"background 0.3s" },
+  backdropVisible: { background:"rgba(12,10,8,0.6)", pointerEvents:"auto" },
+  panel: { position:"fixed", top:0, right:0, height:"100vh", width:300, background:"#221a12", borderLeft:"1px solid #3a2e22", zIndex:30, transform:"translateX(100%)", transition:"transform 0.3s cubic-bezier(0.4,0,0.2,1)", overflowY:"auto", padding:"24px 16px 80px", boxShadow:"-8px 0 32px rgba(0,0,0,0.5)" },
+  panelOpen: { transform:"translateX(0)" },
+  panelHeader: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:18 },
+  panelTitle: { fontSize:15, fontWeight:700, color:"#f4e4c4" },
+  panelClose: { background:"none", border:"none", color:"#7a6448", fontSize:18, cursor:"pointer", padding:4, lineHeight:1 },
+  binCard: { background:"#2a2118", border:"1px solid #3a2e22", borderRadius:12, padding:"13px 11px", marginBottom:10 },
+  binHeader: { display:"flex", alignItems:"center", gap:7, marginBottom:9 },
+  binLabel: { fontSize:13, fontWeight:600, color:"#f4e4c4", flex:1, fontFamily:"'DM Sans',sans-serif" },
+  binCount: { fontSize:11, background:"#3a2e22", color:"#9a7f60", borderRadius:10, padding:"1px 7px", fontFamily:"'DM Sans',sans-serif" },
+  binItems: { marginBottom:7, minHeight:4 },
+  binEmpty: { fontSize:11, color:"#5a4a36", fontFamily:"'DM Sans',sans-serif", padding:"3px 0" },
+  binItem: { display:"flex", alignItems:"center", gap:6, padding:"6px 0", borderBottom:"1px solid #2e2418" },
+  binItemText: { flex:1, fontSize:12, color:"#d4c0a0", fontFamily:"'DM Sans',sans-serif", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  binRemove: { background:"none", border:"none", color:"#5a4a36", fontSize:10, cursor:"pointer", padding:"1px 3px", opacity:0, transition:"opacity 0.15s", flexShrink:0 },
+  binInputRow: { display:"flex", gap:6 },
+  binInput: { flex:1, background:"#1c1712", border:"1px solid #3a2e22", borderRadius:7, padding:"8px 9px", fontSize:13, color:"#f0e8d8", fontFamily:"'Lora',Georgia,serif", outline:"none", minWidth:0 },
+  binAdd: { background:"#3a2e22", border:"none", borderRadius:7, padding:"7px 11px", color:"#c8a878", fontSize:18, cursor:"pointer", lineHeight:1 },
+  binSugs: { display:"flex", flexWrap:"wrap", gap:4, marginTop:7 },
+
+  overlay: { position:"fixed", inset:0, background:"rgba(12,10,8,0.88)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:100, padding:16, backdropFilter:"blur(4px)" },
+  modal: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:18, padding:"22px", width:"100%", maxWidth:460, boxShadow:"0 24px 60px rgba(0,0,0,0.6)", maxHeight:"90vh", overflowY:"auto" },
+  modalHead: { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
+  modalEyebrow: { fontSize:11, color:"#9a7f60", display:"flex", alignItems:"center", marginBottom:3, fontFamily:"'DM Sans',sans-serif" },
+  modalTitle: { fontSize:21, fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.01em" },
+  modalClose: { background:"none", border:"none", color:"#7a6448", fontSize:18, cursor:"pointer", padding:4, flexShrink:0 },
+  modalInput: { width:"100%", background:"#1c1712", border:"1.5px solid #4a3c2a", borderRadius:10, padding:"12px 14px", fontSize:16, color:"#f0e8d8", fontFamily:"'Lora',Georgia,serif", outline:"none", boxSizing:"border-box", marginBottom:12 },
+
+  viewRecipeRow: { display:"flex", alignItems:"center", gap:8, background:"#1e1830", border:"1px solid #3a2858", borderRadius:9, padding:"9px 12px", marginBottom:12 },
+  viewRecipeIcon: { fontSize:14 },
+  viewRecipeName: { flex:1, fontSize:13, color:"#c4aae8", fontFamily:"'DM Sans',sans-serif", fontWeight:600, minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  viewRecipeBtn: { background:"#3a2858", border:"1px solid #5a3888", borderRadius:7, padding:"5px 11px", fontSize:12, color:"#c4aae8", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, flexShrink:0 },
+
+  sugs: { marginBottom:12 },
+  sugsLbl: { fontSize:10, color:"#7a6448", letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:6, fontFamily:"'DM Sans',sans-serif" },
+  sugsList: { display:"flex", flexWrap:"wrap", gap:5 },
+
+  thawSection: { background:"#1c2420", border:"1px solid #2a3d38", borderRadius:10, padding:"11px", marginBottom:12 },
+  thawRow: { display:"flex", alignItems:"center" },
+  thawToggle: { background:"none", border:"none", display:"flex", alignItems:"center", gap:8, cursor:"pointer", color:"#9a9a9a", fontSize:14, fontFamily:"'DM Sans',sans-serif", padding:0 },
+  thawToggleOn: { color:"#7ecfcf" },
+  thawToggleIcon: { fontSize:16 },
+  thawTogglePill: { fontSize:10, background:"#3a2e22", color:"#7a6448", borderRadius:8, padding:"2px 7px", fontWeight:700, letterSpacing:"0.05em" },
+  thawTogglePillOn: { background:"#2a4a44", color:"#7ecfcf" },
+  thawOptions: { marginTop:10, paddingTop:10, borderTop:"1px solid #2a3d38" },
+  thawOptionsLbl: { fontSize:11, color:"#5a8a80", fontFamily:"'DM Sans',sans-serif", marginBottom:7, display:"block" },
+  thawDayBtns: { display:"flex", gap:6, marginBottom:8 },
+  thawDayBtn: { background:"#1c1712", border:"1.5px solid #2a3d38", borderRadius:7, padding:"8px 14px", fontSize:13, color:"#5a8a80", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  thawDayBtnActive: { background:"#1f3530", border:"1.5px solid #7ecfcf", color:"#7ecfcf" },
+  thawPreview: { fontSize:12, color:"#7ecfcf", marginBottom:8, fontFamily:"'DM Sans',sans-serif" },
+  thawCalBtn: { background:"#1f3530", border:"1px solid #2a5048", borderRadius:8, padding:"9px 14px", fontSize:13, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", width:"100%", textAlign:"center" },
+
+  copySection: { marginBottom:14 },
+  copyToggle: { background:"#1c1712", border:"1px solid #4a3c2a", borderRadius:8, padding:"9px 14px", color:"#9a7f60", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:6 },
+  copyToggleActive: { borderColor:"#c8a878", color:"#c8a878", background:"#2e2418" },
+  copyBadge: { background:"#f4c97a", color:"#1c1712", borderRadius:10, padding:"0px 6px", fontSize:10, fontWeight:700 },
+  copyPicker: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:10, padding:"11px", marginTop:7 },
+  copyPickerLbl: { fontSize:11, color:"#7a6448", marginBottom:8, fontFamily:"'DM Sans',sans-serif" },
+  copyDaysRow: { display:"flex", gap:6, flexWrap:"wrap" },
+  dayChip: { background:"#241e16", border:"1.5px solid #3a2e22", borderRadius:6, padding:"6px 0", width:38, textAlign:"center", fontSize:13, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  dayChipSource: { background:"#2e2418", border:"1.5px solid #f4c97a88", color:"#f4c97a", cursor:"default" },
+  dayChipSelected: { background:"#3d3020", border:"1.5px solid #c8a878", color:"#f4e4c4" },
+  copyPreview: { fontSize:11, color:"#89c4a1", marginTop:7, fontFamily:"'DM Sans',sans-serif" },
+
+  modalActions: { display:"flex", gap:8, justifyContent:"flex-end", marginTop:6 },
+  btnClear: { background:"none", border:"1px solid #4a3c2a", borderRadius:10, padding:"11px 18px", color:"#9a7f60", fontSize:14, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  btnSave: { background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", borderRadius:10, padding:"11px 22px", color:"#1c1712", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  btnDisabled: { opacity:0.4, cursor:"default" },
+
+  // Recipe Library
+  recipesRoot: { padding:"20px 16px 24px", maxWidth:960, margin:"0 auto" },
+  recipesHeader: { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
+  newRecipeBtn: { background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", borderRadius:10, padding:"10px 18px", color:"#1c1712", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", flexShrink:0, marginTop:4 },
+  recipeFilters: { marginBottom:16 },
+  recipeSearch: { width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:10, padding:"11px 14px", fontSize:15, color:"#f0e8d8", fontFamily:"'Lora',Georgia,serif", outline:"none", boxSizing:"border-box", marginBottom:10 },
+  typeFilters: { display:"flex", gap:6, flexWrap:"wrap" },
+  typeChip: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:20, padding:"6px 14px", fontSize:12, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  typeChipActive: { background:"#3a2e22", border:"1px solid #c8a878", color:"#f4c97a" },
+  typeChipDiet: { background:"#1e2a1e", border:"1.5px solid #2a4a2a", color:"#6a9a6a" },
+  activeFilterRow: { display:"flex", alignItems:"center", gap:8, marginTop:8, padding:"6px 10px", background:"#1e2418", border:"1px solid #2a3820", borderRadius:8 },
+  activeFilterLbl: { flex:1, fontSize:11, color:"#78c878", fontFamily:"'DM Sans',sans-serif" },
+  activeFilterClear: { background:"none", border:"none", fontSize:11, color:"#5a8a50", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textDecoration:"underline" },
+  typeChipDietActive: { background:"#1e3a1e", border:"1.5px solid #4a8a4a", color:"#78c878" },
+  slotRecipeBtn: { display:"inline-flex", alignItems:"center", gap:4, marginTop:4, background:"#2a1e40", border:"1px solid #5a3888", borderRadius:5, fontSize:10, cursor:"pointer", padding:"3px 7px", color:"#d4b8f8", fontFamily:"'DM Sans',sans-serif", fontWeight:700, lineHeight:1 },
+
+  recipeEmpty: { textAlign:"center", padding:"60px 20px", display:"flex", flexDirection:"column", alignItems:"center", gap:10 },
+  recipeEmptyIcon: { fontSize:40, marginBottom:4 },
+  recipeEmptyTitle: { fontSize:18, fontWeight:700, color:"#c8a878" },
+  recipeEmptyText: { fontSize:13, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", maxWidth:280, lineHeight:1.5 },
+
+  recipeGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:10 },
+  recipeCard: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:14, padding:"14px 13px", cursor:"pointer", textAlign:"left", display:"flex", flexDirection:"column", justifyContent:"space-between", gap:10, transition:"border-color 0.2s,transform 0.15s" },
+  recipeCardTop: { display:"flex", flexDirection:"column", gap:5 },
+  recipeCardName: { fontSize:15, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", lineHeight:1.2 },
+  recipeCardTimes: { display:"flex", gap:8, flexWrap:"wrap" },
+  recipeTime: { fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
+  recipeCardDesc: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" },
+  recipeCardBottom: { display:"flex", alignItems:"center", justifyContent:"space-between" },
+  recipeCardTags: { display:"flex", gap:4, flexWrap:"wrap", flex:1 },
+  recipeCardLink: { fontSize:14, flexShrink:0 },
+
+  tag: { fontSize:10, borderRadius:8, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  tagMeal: { background:"#2e2c18", color:"#c8b840", border:"1px solid #4a4428" },
+  tagDiet: { background:"#1e2e20", color:"#78b878", border:"1px solid #2e4a30" },
+
+  // Recipe Detail
+  recipeDetailRoot: { minHeight:"100%", background:"#1c1712" },
+  detailTopBar: { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 16px", borderBottom:"1px solid #2a2118", position:"sticky", top:0, background:"#1c1712", zIndex:10 },
+  detailBackBtn: { background:"none", border:"none", color:"#9a7f60", fontSize:14, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", padding:"4px 0" },
+  detailTopActions: { display:"flex", gap:8 },
+  detailEditBtn: { background:"#2e2418", border:"1px solid #4a3c2a", borderRadius:8, padding:"7px 16px", color:"#c8a878", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  detailDeleteBtn: { background:"none", border:"1px solid #4a2828", borderRadius:8, padding:"7px 14px", color:"#c07060", fontSize:13, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+
+  detailBody: { padding:"20px 16px 40px", maxWidth:680, margin:"0 auto" },
+  detailTitle: { margin:"0 0 8px", fontSize:"clamp(22px,5vw,30px)", fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.02em" },
+  detailDesc: { fontSize:14, color:"#9a8060", fontFamily:"'DM Sans',sans-serif", marginBottom:16, lineHeight:1.5 },
+  detailMeta: { display:"flex", gap:20, marginBottom:14, flexWrap:"wrap" },
+  detailMetaItem: { display:"flex", alignItems:"center", gap:8 },
+  detailMetaIcon: { fontSize:20 },
+  detailMetaVal: { fontSize:15, fontWeight:700, color:"#f4e4c4", fontFamily:"'DM Sans',sans-serif" },
+  detailMetaLbl: { fontSize:10, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", textTransform:"uppercase", letterSpacing:"0.08em" },
+  detailTags: { display:"flex", gap:5, flexWrap:"wrap", marginBottom:14 },
+  detailUrl: { display:"inline-flex", alignItems:"center", gap:6, color:"#9a99e8", fontSize:13, fontFamily:"'DM Sans',sans-serif", textDecoration:"none", marginBottom:20, padding:"8px 14px", background:"#1e1e2e", border:"1px solid #2e2e4a", borderRadius:8 },
+
+  detailSection: { marginBottom:24 },
+  detailSectionHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 },
+  detailSectionTitle: { fontSize:13, fontWeight:700, color:"#a08060", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
+  scalerRow: { display:"flex", alignItems:"center", gap:10, background:"#241e16", border:"1px solid #3a2e22", borderRadius:10, padding:"6px 10px" },
+  scalerBtn: { background:"#3a2e22", border:"none", borderRadius:6, width:28, height:28, display:"flex", alignItems:"center", justifyContent:"center", color:"#c8a878", fontSize:16, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", lineHeight:1 },
+  scalerVal: { fontSize:16, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", minWidth:60, textAlign:"center" },
+  scalerLbl: { fontSize:11, fontWeight:400, color:"#7a6448" },
+  servingsRow: { display:"flex", alignItems:"center", gap:8 },
+
+  ingredientList: { display:"flex", flexDirection:"column", gap:8 },
+  ingredientRow: { display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background:"#241e16", borderRadius:9 },
+  ingredientDot: { width:5, height:5, borderRadius:"50%", background:"#c8a878", flexShrink:0 },
+  ingredientAmt: { fontSize:13, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", minWidth:50 },
+  ingredientName: { fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif" },
+
+  stepList: { display:"flex", flexDirection:"column", gap:10 },
+  stepRow: { display:"flex", gap:12, alignItems:"flex-start" },
+  stepNum: { width:26, height:26, borderRadius:"50%", background:"#3a2e22", color:"#c8a878", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontFamily:"'DM Sans',sans-serif", marginTop:2 },
+  stepText: { fontSize:14, color:"#e0d0b8", fontFamily:"'DM Sans',sans-serif", lineHeight:1.6, flex:1 },
+
+  // Recipe Editor
+  editorRoot: { minHeight:"100%", background:"#1c1712" },
+  editorTopBar: { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"14px 16px", borderBottom:"1px solid #2a2118", position:"sticky", top:0, background:"#1c1712", zIndex:10 },
+  editorSaveBtn: { padding:"9px 20px", fontSize:14 },
+  editorBody: { padding:"20px 16px", maxWidth:680, margin:"0 auto" },
+  editorField: { marginBottom:16 },
+  editorRow: { display:"flex", gap:10, marginBottom:16, flexWrap:"wrap" },
+  editorLabel: { display:"block", fontSize:11, color:"#9a7f60", letterSpacing:"0.1em", textTransform:"uppercase", marginBottom:6, fontFamily:"'DM Sans',sans-serif" },
+  editorInput: { width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:9, padding:"11px 13px", fontSize:15, color:"#f0e8d8", fontFamily:"'Lora',Georgia,serif", outline:"none", boxSizing:"border-box" },
+  editorTextarea: { width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:9, padding:"11px 13px", fontSize:14, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box", resize:"vertical" },
+
+  tagPicker: { display:"flex", flexWrap:"wrap", gap:6 },
+  tagPickerChip: { background:"#241e16", border:"1.5px solid #3a2e22", borderRadius:20, padding:"7px 14px", fontSize:13, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  tagPickerChipOn: { background:"#2e2c18", border:"1.5px solid #c8b840", color:"#f4e060" },
+  tagPickerDietOn: { background:"#1e2e20", border:"1.5px solid #4a8a50", color:"#78c878" },
+
+  ingredientEditor: { display:"flex", flexDirection:"column", gap:7 },
+  ingredientEditorRow: { display:"flex", gap:6, alignItems:"center" },
+  ingAmtInput: { width:60, flexShrink:0, padding:"10px 8px", fontSize:14 },
+  ingUnitInput: { width:70, flexShrink:0, padding:"10px 8px", fontSize:14 },
+  editorRemoveBtn: { background:"none", border:"none", color:"#7a6448", fontSize:14, cursor:"pointer", padding:"4px 6px", flexShrink:0 },
+  editorAddRowBtn: { background:"none", border:"1px dashed #3a2e22", borderRadius:8, padding:"9px", fontSize:13, color:"#7a6448", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", marginTop:2, textAlign:"center" },
+
+  stepEditor: { display:"flex", flexDirection:"column", gap:8 },
+  stepEditorRow: { display:"flex", gap:8, alignItems:"flex-start" },
+  stepEditorNum: { width:26, height:26, borderRadius:"50%", background:"#3a2e22", color:"#c8a878", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontFamily:"'DM Sans',sans-serif", marginTop:10 },
+};
+
+const chips = {
+  normal: { background:"#1c1712", border:"1px solid #4a3c2a", borderRadius:20, padding:"6px 12px", fontSize:13, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  recipeChip: { background:"#1e1830", border:"1px solid #3a2858", color:"#c4aae8" },
+  small: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:12, padding:"4px 9px", fontSize:12, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+};
+
+const css = `
+  @import url('https://fonts.googleapis.com/css2?family=Lora:wght@400;500;700&family=DM+Sans:wght@400;500;700&display=swap');
+  * { box-sizing: border-box; margin: 0; }
+  .day-card:hover { border-color: #5a4a36 !important; transform: translateY(-1px); }
+  .meal-slot:hover { background: #2e2418; border-color: #5a4a36 !important; }
+  .meal-slot:hover .clear-btn { opacity: 1 !important; }
+  .clear-btn:hover { color: #e07a5f !important; }
+  .bin-item:hover .bin-remove { opacity: 1 !important; }
+  .bin-add-btn:hover { background: #4a3c2a !important; }
+  .extras-btn:hover, .clear-week-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
+  .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
+  .day-chip:hover { background: #2e2418 !important; border-color: #9a7f60 !important; color: #f4e4c4 !important; }
+  .thaw-toggle:hover { color: #7ecfcf !important; }
+  .thaw-day-btn:hover { background: #1f3530 !important; border-color: #4a8a80 !important; color: #9ecfcf !important; }
+  .cal-btn:hover { background: #2a5048 !important; }
+  .slot-recipe-btn:hover { background: #3a2858 !important; border-color: #6a48a8 !important; }
+  .view-recipe-btn:hover { background: #4a3878 !important; }
+  .recipe-card:hover { border-color: #5a4a36 !important; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.4); }
+  button.type-chip:focus { outline: none; }
+  button.type-chip:focus-visible { outline: none; }
+  .tag-chip:hover { opacity: 0.8; }
+  .new-recipe-btn:hover { opacity: 0.9; }
+  .back-btn:hover { color: #c8a878 !important; }
+  .detail-edit-btn:hover { background: #3a2e22 !important; border-color: #c8a878 !important; }
+  .detail-delete-btn:hover { background: #2a1818 !important; }
+  .scaler-btn:hover { background: #4a3c2a !important; }
+  .editor-remove-btn:hover { color: #e07a5f !important; }
+  .editor-add-btn:hover { border-color: #7a6448 !important; color: #c8a878 !important; }
+  .modal-in { animation: modalIn 0.2s ease; }
+  @keyframes modalIn { from{opacity:0;transform:translateY(10px) scale(0.97)} to{opacity:1;transform:none} }
+  input::placeholder, textarea::placeholder { color: #5a4a36; }
+  input:focus, textarea:focus { border-color: #f4c97a88 !important; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #1c1712; }
+  ::-webkit-scrollbar-thumb { background: #3a2e22; border-radius: 2px; }
+  @media (max-width: 480px) {
+    .recipe-grid { grid-template-columns: 1fr 1fr !important; }
+  }
+`;
