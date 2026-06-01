@@ -474,13 +474,15 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                             <span style={s.slotLbl}>{slot}</span>
                             {val&&entry.thaw && <span style={{fontSize:9}}>🧊</span>}
                           </div>
-                          {val ? <span style={s.slotMeal}>{val}</span> : <span style={s.slotPlaceholder}>+ Add</span>}
-                          {linkedRecipeForCard && (
-                            <button style={s.slotRecipeBtn} className="slot-recipe-btn"
-                              onClick={e=>{e.stopPropagation(); onViewRecipe(linkedRecipeForCard.name);}}>
-                              📖 <span style={{fontSize:10,fontWeight:700}}>View Recipe</span>
-                            </button>
-                          )}
+                          <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+                            {val ? <span style={s.slotMeal}>{val}</span> : <span style={s.slotPlaceholder}>+ Add</span>}
+                            {linkedRecipeForCard && (
+                              <button style={s.slotRecipeBtn} className="slot-recipe-btn"
+                                onClick={e=>{e.stopPropagation(); onViewRecipe(linkedRecipeForCard.name);}}>
+                                📖 <span style={{fontSize:10,fontWeight:700}}>View Recipe</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                         {val && <button className="clear-btn" style={s.clearBtn} onClick={(e)=>clearMeal(day,slot,e)}>✕</button>}
                       </div>
