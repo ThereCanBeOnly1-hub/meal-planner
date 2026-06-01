@@ -1,6 +1,6 @@
 {
   "name": "Meal Planner",
-  "short_name": "Meal Planner",
+  "short_name": "Weekly Meals",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#1c1712",
