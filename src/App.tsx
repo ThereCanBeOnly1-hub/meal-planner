@@ -76,8 +76,8 @@ const newRecipe = () => ({
 });
 
 // ─── Supabase Config ─────────────────────────────────────────────────────────
-const SUPABASE_URL = "https://gniejhtptibpfvunwoih.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImduaWVqaHRwdGlicGZ2dW53b2loIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMzQyMTMsImV4cCI6MjA5NTkxMDIxM30.uWvKv41wUaXKiO7gkBVExA5Mjm7O-UcWhY8bMGt0_0c";
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY ?? "";
 const isConfigured = !SUPABASE_URL.includes("PASTE");
 
 const sb = {
