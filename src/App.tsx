@@ -342,12 +342,13 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     const onPopState = () => {
       isRestoringRef.current = true;
       if (modal) { setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false); }
+      else if (showClearConfirm) { setShowClearConfirm(false); }
       else if (panelOpen) { setPanelOpen(false); }
       isRestoringRef.current = false;
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [modal, panelOpen]);
+  }, [modal, showClearConfirm, panelOpen]);
 
   const openModal = (day, slot) => {
     const cur = week[day][slot];
@@ -381,7 +382,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     setWeek(prev => ({ ...prev, [day]: { ...prev[day], [slot]: { meal:"", thaw:false, thawDays:2, recipeId:null } } }));
   };
 
-  const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); };
+  const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); history.back(); };
 
   const toggleCopyDay = (di) => setCopyDays(prev => prev.includes(di)?prev.filter(x=>x!==di):[...prev,di]);
   const addSnack = (v) => { v=v.trim(); if(!v)return; setSnacks(p=>[...p,v]); setSnackInput(""); setSnackSugOpen(false); };
@@ -447,7 +448,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
               })}
             </div>
             <div style={s.headerActions}>
-              <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => setShowClearConfirm(true)} title="Clear week">
+              <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => { setShowClearConfirm(true); history.pushState({ overlay: "clearConfirm" }, ""); }} title="Clear week">
                 <span style={{fontSize:14}}>🗑</span>
                 <span style={s.clearWeekLabel}>Clear</span>
               </button>
@@ -579,13 +580,13 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 
       {/* CLEAR WEEK CONFIRM */}
       {showClearConfirm && (
-        <div style={s.overlay} onClick={()=>setShowClearConfirm(false)}>
+        <div style={s.overlay} onClick={()=>{ setShowClearConfirm(false); history.back(); }}>
           <div style={{...s.modal,maxWidth:320,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
             <div style={{fontSize:32,marginBottom:12}}>🗑</div>
             <div style={{...s.modalTitle,fontSize:18,marginBottom:8}}>Clear the week?</div>
             <div style={{fontSize:13,color:"#9a7f60",marginBottom:24,fontFamily:"'DM Sans',sans-serif"}}>This will remove all meals from every day. Can't be undone.</div>
             <div style={{display:"flex",gap:10,justifyContent:"center"}}>
-              <button style={s.btnClear} onClick={()=>setShowClearConfirm(false)}>Cancel</button>
+              <button style={s.btnClear} onClick={()=>{ setShowClearConfirm(false); history.back(); }}>Cancel</button>
               <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={clearWeek}>Clear Week</button>
             </div>
           </div>
@@ -808,6 +809,15 @@ function RecipeGrid({ recipes, onNew, onSelect }) {
 function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
   const [servings, setServings] = useState(recipe.baseServings || 4);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const isRestoringRef = useRef(false);
+
+  useEffect(() => {
+    const onPopState = () => {
+      if (showDeleteConfirm) { isRestoringRef.current = true; setShowDeleteConfirm(false); isRestoringRef.current = false; }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [showDeleteConfirm]);
 
   return (
     <div style={s.recipeDetailRoot}>
@@ -816,7 +826,7 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
         <button style={s.detailBackBtn} className="back-btn" onClick={onBack}>← Recipes</button>
         <div style={s.detailTopActions}>
           <button style={s.detailEditBtn} className="detail-edit-btn" onClick={onEdit}>Edit</button>
-          <button style={s.detailDeleteBtn} className="detail-delete-btn" onClick={()=>setShowDeleteConfirm(true)}>Delete</button>
+          <button style={s.detailDeleteBtn} className="detail-delete-btn" onClick={()=>{ setShowDeleteConfirm(true); history.pushState({ overlay: "deleteConfirm" }, ""); }}>Delete</button>
         </div>
       </div>
 
@@ -888,14 +898,14 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
 
       {/* Delete confirm */}
       {showDeleteConfirm && (
-        <div style={s.overlay} onClick={()=>setShowDeleteConfirm(false)}>
+        <div style={s.overlay} onClick={()=>{ setShowDeleteConfirm(false); if (!isRestoringRef.current) history.back(); }}>
           <div style={{...s.modal,maxWidth:300,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
             <div style={{fontSize:28,marginBottom:10}}>🗑</div>
             <div style={{...s.modalTitle,fontSize:17,marginBottom:6}}>Delete recipe?</div>
             <div style={{fontSize:12,color:"#9a7f60",marginBottom:20,fontFamily:"'DM Sans',sans-serif"}}>"{recipe.name}" will be permanently removed.</div>
             <div style={{display:"flex",gap:8,justifyContent:"center"}}>
-              <button style={s.btnClear} onClick={()=>setShowDeleteConfirm(false)}>Cancel</button>
-              <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={()=>onDelete(recipe.id)}>Delete</button>
+              <button style={s.btnClear} onClick={()=>{ setShowDeleteConfirm(false); history.back(); }}>Cancel</button>
+              <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={()=>{ history.back(); onDelete(recipe.id); }}>Delete</button>
             </div>
           </div>
         </div>
