@@ -630,9 +630,9 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
             return (
               <div key={day} style={{...s.card,...(isToday?s.cardToday:{}),...(hasThaw?s.cardThaw:{})}} className="day-card">
                 <div style={s.cardHead}>
-                  <div>
+                  <div style={{display:"flex",alignItems:"baseline",gap:5}}>
                     <span style={{...s.dayName,...(isToday?s.dayNameToday:{})}}>{day.slice(0,3).toUpperCase()}</span>
-                    <div style={s.dayDate}>{getDateForDay(day, viewedWeekStart).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</div>
+                    <span style={s.dayDate}>{getDateForDay(day, viewedWeekStart).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</span>
                   </div>
                   <div style={s.cardBadges}>
                     {hasThaw && <span style={s.thawBadge}>🧊</span>}
@@ -1276,7 +1276,7 @@ const s = {
   cardBadges: { display:"flex", alignItems:"center", gap:4 },
   dayName: { fontSize:12, fontWeight:700, letterSpacing:"0.1em", color:"#c8a878", fontFamily:"'DM Sans',sans-serif" },
   dayNameToday: { color:"#f4c97a" },
-  dayDate: { fontSize:10, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", marginTop:1 },
+  dayDate: { fontSize:10, color:"#7a6448", fontFamily:"'DM Sans',sans-serif" },
   thawBadge: { fontSize:12 },
   todayBadge: { fontSize:10, background:"#f4c97a22", color:"#f4c97a", border:"1px solid #f4c97a55", borderRadius:10, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif" },
   slots: { display:"flex", flexDirection:"column", gap:5 },
