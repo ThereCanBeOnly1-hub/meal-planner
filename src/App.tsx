@@ -222,6 +222,11 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
   const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
   const [nextWeekMeals, setNextWeekMeals] = useState(initialWeek());
+  const [customTags, setCustomTags] = useState(() => ({
+    mealtypes: loadCustomTags("mealtypes"),
+    diets: loadCustomTags("diets"),
+    cuisines: loadCustomTags("cuisines"),
+  }));
   const [location, setLocation] = useState(() => { try { const s = localStorage.getItem("mealplanner_loc"); return s ? JSON.parse(s) : null; } catch { return null; } });
   const [weatherData, setWeatherData] = useState({});
   const isLoadingRef = useRef(false);
@@ -319,6 +324,20 @@ export default function App() {
     extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 300);
   }, [snacks, desserts]);
 
+  const saveCustomTagsToDB = async (tags) => {
+    if (!isConfigured) return;
+    try { await sb.upsert("app_settings", [{ key: "custom_tags", value: tags }], "key"); } catch {}
+  };
+
+  const addCustomTag = (type, tag) => {
+    setCustomTags(prev => {
+      const next = { ...prev, [type]: prev[type].includes(tag) ? prev[type] : [...prev[type], tag] };
+      if (isConfigured) saveCustomTagsToDB(next);
+      else saveCustomTags(type, next[type]);
+      return next;
+    });
+  };
+
   const loadAll = async () => {
     try {
       isLoadingRef.current = true;
@@ -326,11 +345,12 @@ export default function App() {
       const ws = viewedWeekStartRef.current;
 
       const nextWs = addWeeks(ws, 1);
-      const [mealsRows, nextMealsRows, recipeRows, extrasRows] = await Promise.all([
+      const [mealsRows, nextMealsRows, recipeRows, extrasRows, settingsRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
         sb.get("meals", `?week_start=eq.${nextWs}`),
         sb.get("recipes", "?order=created_at.asc"),
         sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
+        sb.get("app_settings", "?key=eq.custom_tags"),
       ]);
 
       const parseWeekRows = (rows) => {
@@ -355,6 +375,10 @@ export default function App() {
 
       setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
       setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
+
+      if (settingsRows.length > 0 && settingsRows[0].value) {
+        setCustomTags(prev => ({ ...prev, ...settingsRows[0].value }));
+      }
 
       hasLoadedRef.current = true;
       setSyncStatus("synced");
@@ -454,7 +478,8 @@ export default function App() {
         )}
         {tab === "recipes" && (
           <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
-            onSave={saveRecipe} onDelete={deleteRecipe} />
+            onSave={saveRecipe} onDelete={deleteRecipe}
+            customTags={customTags} onAddCustomTag={addCustomTag} />
         )}
       </div>
       <nav style={s.bottomNav}>
@@ -978,22 +1003,20 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 }
 
 // ─── Recipes View ─────────────────────────────────────────────────────────────
-function RecipesView({ recipes, view, setView, onSave, onDelete }) {
-  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} />;
+function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag }) {
+  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
   if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} />;
-  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} />;
+  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
 
 // ─── Tag Picker ───────────────────────────────────────────────────────────────
-function TagPicker({ label, defaultTags, customKey, selected, onToggle, chipStyle, chipActiveStyle }) {
-  const [customTags, setCustomTags] = useState(() => loadCustomTags(customKey));
+function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, selected, onToggle, chipStyle, chipActiveStyle }) {
   const [adding, setAdding] = useState(false);
   const [input, setInput] = useState("");
-  const allTags = [...defaultTags, ...customTags.filter(t => !defaultTags.includes(t))];
+  const allTags = [...defaultTags, ...(customTagsList||[]).filter(t => !defaultTags.includes(t))];
   const addCustom = () => {
     const v = input.trim(); if (!v) return;
-    const next = customTags.includes(v) ? customTags : [...customTags, v];
-    setCustomTags(next); saveCustomTags(customKey, next);
+    onAddCustomTag(v);
     if (!selected.includes(v)) onToggle(v);
     setInput(""); setAdding(false);
   };
@@ -1020,16 +1043,16 @@ function TagPicker({ label, defaultTags, customKey, selected, onToggle, chipStyl
 }
 
 // ─── Recipe Grid ──────────────────────────────────────────────────────────────
-function RecipeGrid({ recipes, onNew, onSelect }) {
+function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
   const [filter, setFilter] = useState("");
   const [activeFilters, setActiveFilters] = useState(new Set());
 
   const toggleFilter = (tag) => setActiveFilters(prev => { const n=new Set(prev); n.has(tag)?n.delete(tag):n.add(tag); return n; });
   const clearFilters = () => setActiveFilters(new Set());
 
-  const allMealTypes = [...new Set([...MEAL_TYPE_TAGS, ...recipes.flatMap(r=>r.mealTypes)])];
-  const allDietTags  = [...new Set([...DIET_TAGS,      ...recipes.flatMap(r=>r.dietTags)])];
-  const allCuisines  = [...new Set([...CUISINE_TAGS,   ...loadCustomTags("cuisines"), ...recipes.flatMap(r=>r.cuisineTags||[])])];
+  const allMealTypes = [...new Set([...MEAL_TYPE_TAGS, ...(customTags?.mealtypes||[]), ...recipes.flatMap(r=>r.mealTypes)])];
+  const allDietTags  = [...new Set([...DIET_TAGS,      ...(customTags?.diets||[]),     ...recipes.flatMap(r=>r.dietTags)])];
+  const allCuisines  = [...new Set([...CUISINE_TAGS,   ...(customTags?.cuisines||[]),  ...recipes.flatMap(r=>r.cuisineTags||[])])];
 
   const filtered = recipes.filter(r => {
     const matchName = r.name.toLowerCase().includes(filter.toLowerCase());
@@ -1219,7 +1242,7 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
 }
 
 // ─── Recipe Editor ────────────────────────────────────────────────────────────
-function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
+function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onAddCustomTag }) {
   const [r, setR] = useState(initialRecipe);
   const set = (key, val) => setR(prev => ({...prev, [key]: val}));
 
@@ -1313,19 +1336,19 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
         {(()=>{const t=formatMinutes(parseMinutes(r.prepTime)+parseMinutes(r.cookTime));return t?<div style={{fontSize:11,color:"#89c4a1",marginTop:-8,marginBottom:4,fontFamily:"'DM Sans',sans-serif"}}>⏱ Total: {t}</div>:null;})()}
 
         {/* Meal Types */}
-        <TagPicker label="Meal Type" defaultTags={MEAL_TYPE_TAGS} customKey="mealtypes"
-          selected={r.mealTypes} onToggle={toggleMealType}
-          chipActiveStyle={s.tagPickerChipOn} />
+        <TagPicker label="Meal Type" defaultTags={MEAL_TYPE_TAGS}
+          customTagsList={customTags?.mealtypes} onAddCustomTag={t=>onAddCustomTag("mealtypes",t)}
+          selected={r.mealTypes} onToggle={toggleMealType} chipActiveStyle={s.tagPickerChipOn} />
 
         {/* Diet Tags */}
-        <TagPicker label="Dietary Tags" defaultTags={DIET_TAGS} customKey="diets"
-          selected={r.dietTags} onToggle={toggleDietTag}
-          chipActiveStyle={s.tagPickerDietOn} />
+        <TagPicker label="Dietary Tags" defaultTags={DIET_TAGS}
+          customTagsList={customTags?.diets} onAddCustomTag={t=>onAddCustomTag("diets",t)}
+          selected={r.dietTags} onToggle={toggleDietTag} chipActiveStyle={s.tagPickerDietOn} />
 
         {/* Cuisine Tags */}
-        <TagPicker label="Cuisine" defaultTags={CUISINE_TAGS} customKey="cuisines"
-          selected={r.cuisineTags||[]} onToggle={toggleCuisineTag}
-          chipActiveStyle={s.tagPickerCuisineOn} />
+        <TagPicker label="Cuisine" defaultTags={CUISINE_TAGS}
+          customTagsList={customTags?.cuisines} onAddCustomTag={t=>onAddCustomTag("cuisines",t)}
+          selected={r.cuisineTags||[]} onToggle={toggleCuisineTag} chipActiveStyle={s.tagPickerCuisineOn} />
 
         {/* Ingredients */}
         <div style={s.editorField}>
