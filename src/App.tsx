@@ -140,6 +140,7 @@ export default function App() {
   const [desserts, setDesserts] = useState([]);
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
   const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
+  const [nextWeekMeals, setNextWeekMeals] = useState(initialWeek());
   const isLoadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
   const mealTimer = useRef(null);
@@ -184,6 +185,7 @@ export default function App() {
     if (!isConfigured) return;
     hasLoadedRef.current = false;
     setWeek(initialWeek());
+    setNextWeekMeals(initialWeek());
     setSnacks([]);
     setDesserts([]);
     loadAll();
@@ -216,24 +218,24 @@ export default function App() {
       setSyncStatus("syncing");
       const ws = viewedWeekStartRef.current;
 
-      const [mealsRows, recipeRows, extrasRows] = await Promise.all([
+      const nextWs = addWeeks(ws, 1);
+      const [mealsRows, nextMealsRows, recipeRows, extrasRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
+        sb.get("meals", `?week_start=eq.${nextWs}`),
         sb.get("recipes", "?order=created_at.asc"),
         sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
       ]);
 
-      const newWeek = initialWeek();
-      mealsRows.forEach(row => {
-        if (newWeek[row.day]?.[row.slot] !== undefined) {
-          newWeek[row.day][row.slot] = {
-            meal: row.meal_name || "",
-            thaw: row.thaw || false,
-            thawDays: row.thaw_days || 2,
-            recipeId: row.recipe_id || null,
-          };
-        }
-      });
-      setWeek(newWeek);
+      const parseWeekRows = (rows) => {
+        const w = initialWeek();
+        rows.forEach(row => {
+          if (w[row.day]?.[row.slot] !== undefined)
+            w[row.day][row.slot] = { meal: row.meal_name || "", thaw: row.thaw || false, thawDays: row.thaw_days || 2, recipeId: row.recipe_id || null };
+        });
+        return w;
+      };
+      setWeek(parseWeekRows(mealsRows));
+      setNextWeekMeals(parseWeekRows(nextMealsRows));
 
       setRecipes(recipeRows.map(r => ({
         id: r.id, name: r.name, description: r.description || "",
@@ -329,6 +331,7 @@ export default function App() {
             desserts={desserts} setDesserts={setDesserts}
             syncStatus={syncStatus}
             viewedWeekStart={viewedWeekStart}
+            nextWeekMeals={nextWeekMeals}
             onPrevWeek={() => setViewedWeekStart(ws => addWeeks(ws, -1))}
             onNextWeek={() => setViewedWeekStart(ws => addWeeks(ws, 1))}
             onGoToWeek={(ws) => setViewedWeekStart(ws)}
@@ -358,10 +361,29 @@ export default function App() {
   );
 }
 
+// ─── Thaw Item Row ────────────────────────────────────────────────────────────
+function ThawItemRow({ item }) {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const thaw = new Date(item.thawDate); thaw.setHours(0,0,0,0);
+  const isToday = thaw.getTime() === today.getTime();
+  return (
+    <div style={{...s.prepItem,...(isToday?{background:"#3d1515",border:"1px solid #c0392b"}:{})}}>
+      <div style={s.prepItemLeft}>
+        <span style={s.prepMeal}>{item.mealName}</span>
+        <span style={s.prepMeta}>{item.day} · {item.slot}</span>
+      </div>
+      <div style={s.prepItemRight}>
+        <span style={{...s.prepThawDate,...(isToday?s.prepThawDateUrgent:{})}}>{isToday ? "🚨 Thaw Today!" : `Thaw by ${item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}`}</span>
+        <button style={s.prepCalBtn} className="cal-btn" onClick={() => openCalendarEvent(item.mealName,item.slot,item.day,item.thawDays,item.ws)}>📅 Add</button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Planner View ─────────────────────────────────────────────────────────────
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
+function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
   const [modal, setModal] = useState(null);
   const [inputVal, setInputVal] = useState("");
   const [thawOn, setThawOn] = useState(false);
@@ -471,15 +493,25 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const slotCounts = MEAL_SLOTS.reduce((acc, slot) => { acc[slot] = Object.values(week).filter(d=>d[slot].meal).length; return acc; }, {});
   const extrasCount = snacks.length + desserts.length;
 
-  const thawItems = [];
-  DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
-    const e = week[day][slot];
-    if (e.meal && e.thaw) {
-      const md = getDateForDay(day, viewedWeekStart); const td = new Date(md); td.setDate(md.getDate()-e.thawDays);
-      thawItems.push({ mealName:e.meal, slot, day, thawDays:e.thawDays, thawDate:td });
-    }
-  }));
-  thawItems.sort((a,b) => a.thawDate-b.thawDate);
+  const buildThawItems = (weekData, ws) => {
+    const items = [];
+    DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
+      const e = weekData[day][slot];
+      if (e.meal && e.thaw) {
+        const md = getDateForDay(day, ws); const td = new Date(md); td.setDate(md.getDate()-e.thawDays);
+        items.push({ mealName:e.meal, slot, day, thawDays:e.thawDays, thawDate:td, ws });
+      }
+    }));
+    return items.sort((a,b) => a.thawDate-b.thawDate);
+  };
+  const thawItems = buildThawItems(week, viewedWeekStart);
+  const nextWs = addWeeks(viewedWeekStart, 1);
+  const wsStart = new Date(viewedWeekStart + "T00:00:00");
+  const wsEnd = new Date(viewedWeekStart + "T00:00:00"); wsEnd.setDate(wsEnd.getDate()+6); wsEnd.setHours(23,59,59,999);
+  const nextWeekThawItems = buildThawItems(nextWeekMeals, nextWs).filter(item => {
+    const td = new Date(item.thawDate); td.setHours(0,0,0,0);
+    return td >= wsStart && td <= wsEnd;
+  });
 
 
 
@@ -568,29 +600,21 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       </header>
 
       {/* THAW BANNER */}
-      {thawItems.length > 0 && (
+      {(thawItems.length > 0 || nextWeekThawItems.length > 0) && (
         <div style={s.prepBanner}>
           <div style={s.prepBannerInner}>
-            <div style={s.prepBannerTitle}><span>🧊</span> This Week's Thaw Reminders</div>
-            <div style={s.prepList}>
-              {thawItems.map((item,i) => {
-                const today = new Date(); today.setHours(0,0,0,0);
-                const thaw = new Date(item.thawDate); thaw.setHours(0,0,0,0);
-                const isToday = thaw.getTime() === today.getTime();
-                return (
-                <div key={i} style={{...s.prepItem,...(isToday?{background:"#3d1515",border:"1px solid #c0392b"}:{})}}>
-                  <div style={s.prepItemLeft}>
-                    <span style={s.prepMeal}>{item.mealName}</span>
-                    <span style={s.prepMeta}>{item.day} · {item.slot}</span>
-                  </div>
-                  <div style={s.prepItemRight}>
-                    <span style={{...s.prepThawDate,...(isToday?s.prepThawDateUrgent:{})}}>{isToday ? "🚨 Thaw Today!" : `Thaw by ${item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}`}</span>
-                    <button style={s.prepCalBtn} className="cal-btn" onClick={() => openCalendarEvent(item.mealName,item.slot,item.day,item.thawDays,viewedWeekStart)}>📅 Add</button>
-                  </div>
-                </div>
-                );
-              })}
-            </div>
+            {thawItems.length > 0 && <>
+              <div style={s.prepBannerTitle}><span>🧊</span> This Week's Thaw Reminders</div>
+              <div style={s.prepList}>
+                {thawItems.map((item,i) => <ThawItemRow key={i} item={item} />)}
+              </div>
+            </>}
+            {nextWeekThawItems.length > 0 && <>
+              <div style={{...s.prepBannerTitle, marginTop: thawItems.length>0 ? 14 : 0, color:"#c8a878"}}><span>🔜</span> Thaw Now — for Next Week</div>
+              <div style={s.prepList}>
+                {nextWeekThawItems.map((item,i) => <ThawItemRow key={i} item={item} />)}
+              </div>
+            </>}
           </div>
         </div>
       )}
@@ -606,7 +630,10 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
             return (
               <div key={day} style={{...s.card,...(isToday?s.cardToday:{}),...(hasThaw?s.cardThaw:{})}} className="day-card">
                 <div style={s.cardHead}>
-                  <span style={{...s.dayName,...(isToday?s.dayNameToday:{})}}>{day.slice(0,3).toUpperCase()}</span>
+                  <div>
+                    <span style={{...s.dayName,...(isToday?s.dayNameToday:{})}}>{day.slice(0,3).toUpperCase()}</span>
+                    <div style={s.dayDate}>{getDateForDay(day, viewedWeekStart).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</div>
+                  </div>
                   <div style={s.cardBadges}>
                     {hasThaw && <span style={s.thawBadge}>🧊</span>}
                     {isToday && <span style={s.todayBadge}>Today</span>}
@@ -1249,6 +1276,7 @@ const s = {
   cardBadges: { display:"flex", alignItems:"center", gap:4 },
   dayName: { fontSize:12, fontWeight:700, letterSpacing:"0.1em", color:"#c8a878", fontFamily:"'DM Sans',sans-serif" },
   dayNameToday: { color:"#f4c97a" },
+  dayDate: { fontSize:10, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", marginTop:1 },
   thawBadge: { fontSize:12 },
   todayBadge: { fontSize:10, background:"#f4c97a22", color:"#f4c97a", border:"1px solid #f4c97a55", borderRadius:10, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif" },
   slots: { display:"flex", flexDirection:"column", gap:5 },
