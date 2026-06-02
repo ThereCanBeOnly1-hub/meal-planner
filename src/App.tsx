@@ -326,7 +326,8 @@ export default function App() {
 
   const saveCustomTagsToDB = async (tags) => {
     if (!isConfigured) return;
-    try { await sb.upsert("app_settings", [{ key: "custom_tags", value: tags }], "key"); } catch {}
+    try { await sb.upsert("app_settings", [{ key: "custom_tags", value: tags }], "key"); }
+    catch (e) { console.error("Custom tag save failed:", e); }
   };
 
   const addCustomTag = (type, tag) => {
