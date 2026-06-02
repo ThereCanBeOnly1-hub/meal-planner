@@ -764,7 +764,6 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                             )}
                           </div>
                         </div>
-                        {val && <button className="clear-btn" style={s.clearBtn} onClick={(e)=>clearMeal(day,slot,e)}>✕</button>}
                       </div>
                     );
                   })}
