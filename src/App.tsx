@@ -9,6 +9,7 @@ const slotColors = { Breakfast:"#f4c97a", Lunch:"#89c4a1", Dinner:"#e07a5f" };
 
 const DIET_TAGS = ["Gluten-Free","Dairy-Free","Low Sodium","Low Carb","Vegetarian","Vegan","Nut-Free","High Protein"];
 const MEAL_TYPE_TAGS = ["Breakfast","Lunch","Dinner","Snack","Dessert"];
+const CUISINE_TAGS = ["American","Italian","Mexican","Asian","Mediterranean","Indian","Chinese","Japanese","Thai","French","Greek","Middle Eastern","BBQ","Comfort Food","Seafood"];
 
 const SNACK_SUGGESTIONS = ["Apple & PB","Cheese & Crackers","Trail Mix","Yogurt","Hummus & Veggies","Granola Bar","Popcorn","String Cheese","Rice Cakes","Fruit Salad"];
 const DESSERT_SUGGESTIONS = ["Ice Cream","Brownies","Cookies","Fruit Sorbet","Pudding","Cheesecake","Apple Pie","Chocolate Mousse","Gelato","Cupcakes"];
@@ -55,6 +56,39 @@ const getWeeksInMonth = (year, month) => {
 };
 
 const getTodayName = () => ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
+
+// ─── Recipe helpers ───────────────────────────────────────────────────────────
+const loadCustomTags = (key) => { try { return JSON.parse(localStorage.getItem(`mealplanner_custom_${key}`) || "[]"); } catch { return []; } };
+const saveCustomTags = (key, tags) => localStorage.setItem(`mealplanner_custom_${key}`, JSON.stringify(tags));
+
+const resizeImage = (file, maxW = 600) => new Promise(resolve => {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxW / img.width);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale); canvas.height = Math.round(img.height * scale);
+      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.78));
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+});
+
+const parseMinutes = (str) => {
+  if (!str) return 0;
+  const s = str.toLowerCase().trim();
+  const hr = s.match(/(\d+\.?\d*)\s*h/); const mn = s.match(/(\d+\.?\d*)\s*m/);
+  if (hr || mn) return Math.round((hr ? parseFloat(hr[1]) * 60 : 0) + (mn ? parseFloat(mn[1]) : 0));
+  const n = s.match(/^(\d+)$/); return n ? parseInt(n[1]) : 0;
+};
+const formatMinutes = (mins) => {
+  if (!mins) return null;
+  const h = Math.floor(mins / 60); const m = mins % 60;
+  if (h === 0) return `${m} min`; if (m === 0) return `${h} hr`; return `${h} hr ${m} min`;
+};
 
 const MEAL_HOURS = { Breakfast: 8, Lunch: 12, Dinner: 19 };
 
@@ -131,11 +165,11 @@ const scaleAmount = (amount, baseServings, currentServings) => {
 
 const newRecipe = () => ({
   id: Date.now().toString(),
-  name: "", description: "", url: "",
+  name: "", description: "", url: "", photo: "", notes: "",
   prepTime: "", cookTime: "", baseServings: 4,
   ingredients: [{ id: Date.now().toString(), amount: "", unit: "", name: "" }],
   steps: [{ id: Date.now().toString(), text: "" }],
-  mealTypes: [], dietTags: [],
+  mealTypes: [], dietTags: [], cuisineTags: [],
 });
 
 // ─── Supabase Config ─────────────────────────────────────────────────────────
@@ -312,9 +346,10 @@ export default function App() {
 
       setRecipes(recipeRows.map(r => ({
         id: r.id, name: r.name, description: r.description || "",
-        url: r.url || "", prepTime: r.prep_time || "", cookTime: r.cook_time || "",
+        url: r.url || "", photo: r.photo || "", notes: r.notes || "",
+        prepTime: r.prep_time || "", cookTime: r.cook_time || "",
         baseServings: r.base_servings || 4,
-        mealTypes: r.meal_types || [], dietTags: r.diet_tags || [],
+        mealTypes: r.meal_types || [], dietTags: r.diet_tags || [], cuisineTags: r.cuisine_tags || [],
         ingredients: r.ingredients || [], steps: r.steps || [],
       })));
 
@@ -370,10 +405,12 @@ export default function App() {
       try {
         await sb.upsert("recipes", [{
           id: recipe.id, name: recipe.name, description: recipe.description,
-          url: recipe.url, prep_time: recipe.prepTime, cook_time: recipe.cookTime,
+          url: recipe.url, photo: recipe.photo, notes: recipe.notes,
+          prep_time: recipe.prepTime, cook_time: recipe.cookTime,
           base_servings: recipe.baseServings, meal_types: recipe.mealTypes,
-          diet_tags: recipe.dietTags, ingredients: recipe.ingredients,
-          steps: recipe.steps, updated_at: new Date().toISOString(),
+          diet_tags: recipe.dietTags, cuisine_tags: recipe.cuisineTags,
+          ingredients: recipe.ingredients, steps: recipe.steps,
+          updated_at: new Date().toISOString(),
         }]);
         setSyncStatus("synced");
       } catch (err) { console.error("Save recipe:", err); setSyncStatus("error"); }
@@ -947,95 +984,114 @@ function RecipesView({ recipes, view, setView, onSave, onDelete }) {
   return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} />;
 }
 
+// ─── Tag Picker ───────────────────────────────────────────────────────────────
+function TagPicker({ label, defaultTags, customKey, selected, onToggle, chipStyle, chipActiveStyle }) {
+  const [customTags, setCustomTags] = useState(() => loadCustomTags(customKey));
+  const [adding, setAdding] = useState(false);
+  const [input, setInput] = useState("");
+  const allTags = [...defaultTags, ...customTags.filter(t => !defaultTags.includes(t))];
+  const addCustom = () => {
+    const v = input.trim(); if (!v) return;
+    const next = customTags.includes(v) ? customTags : [...customTags, v];
+    setCustomTags(next); saveCustomTags(customKey, next);
+    if (!selected.includes(v)) onToggle(v);
+    setInput(""); setAdding(false);
+  };
+  return (
+    <div style={s.editorField}>
+      <label style={s.editorLabel}>{label}</label>
+      <div style={s.tagPicker}>
+        {allTags.map(t => (
+          <button key={t} style={{...s.tagPickerChip,...(selected.includes(t)?chipActiveStyle:{})}} className="tag-chip" onClick={()=>onToggle(t)}>{t}</button>
+        ))}
+        {!adding && <button style={s.addCustomChip} onClick={()=>setAdding(true)}>+ Custom</button>}
+      </div>
+      {adding && (
+        <div style={s.customTagRow}>
+          <input style={{...s.editorInput,flex:1}} autoFocus placeholder="New tag…" value={input}
+            onChange={e=>setInput(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter")addCustom();if(e.key==="Escape"){setAdding(false);setInput("");}}} />
+          <button style={s.btnSave} onClick={addCustom}>Add</button>
+          <button style={s.btnClear} onClick={()=>{setAdding(false);setInput("");}}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Recipe Grid ──────────────────────────────────────────────────────────────
 function RecipeGrid({ recipes, onNew, onSelect }) {
   const [filter, setFilter] = useState("");
   const [activeFilters, setActiveFilters] = useState(new Set());
 
-  const toggleFilter = (tag) => setActiveFilters(prev => {
-    const next = new Set(prev);
-    next.has(tag) ? next.delete(tag) : next.add(tag);
-    return next;
-  });
+  const toggleFilter = (tag) => setActiveFilters(prev => { const n=new Set(prev); n.has(tag)?n.delete(tag):n.add(tag); return n; });
   const clearFilters = () => setActiveFilters(new Set());
+
+  const allMealTypes = [...new Set([...MEAL_TYPE_TAGS, ...recipes.flatMap(r=>r.mealTypes)])];
+  const allDietTags  = [...new Set([...DIET_TAGS,      ...recipes.flatMap(r=>r.dietTags)])];
+  const allCuisines  = [...new Set([...CUISINE_TAGS,   ...loadCustomTags("cuisines"), ...recipes.flatMap(r=>r.cuisineTags||[])])];
 
   const filtered = recipes.filter(r => {
     const matchName = r.name.toLowerCase().includes(filter.toLowerCase());
     if (activeFilters.size === 0) return matchName;
-    // All active filters must match (AND logic) - check across both tag types
-    const allTags = [...r.mealTypes, ...r.dietTags];
-    const matchTags = [...activeFilters].every(f => allTags.includes(f));
-    return matchName && matchTags;
+    const allTags = [...r.mealTypes, ...r.dietTags, ...(r.cuisineTags||[])];
+    return matchName && [...activeFilters].every(f => allTags.includes(f));
   });
+
+  const FilterRow = ({ tags, chipStyle, activeStyle }) => (
+    <div style={s.typeFilters}>
+      {tags.map(t => <button key={t} style={{...s.typeChip,...chipStyle,...(activeFilters.has(t)?activeStyle:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>)}
+    </div>
+  );
 
   return (
     <div style={s.recipesRoot}>
       <div style={s.recipesHeader}>
-        <div>
-          <div style={s.eyebrow}>Recipe Library</div>
-          <h1 style={s.title}>Your Recipes</h1>
-        </div>
+        <div><div style={s.eyebrow}>Recipe Library</div><h1 style={s.title}>Your Recipes</h1></div>
         <button style={s.newRecipeBtn} className="new-recipe-btn" onClick={onNew}>+ New</button>
       </div>
-
       <div style={s.recipeFilters}>
         <input style={s.recipeSearch} placeholder="🔍  Search recipes…" value={filter} onChange={e=>setFilter(e.target.value)} />
         <div style={s.typeFilters}>
           <button style={{...s.typeChip,...(activeFilters.size===0?s.typeChipActive:{})}} className="type-chip" onClick={clearFilters}>All</button>
-          {MEAL_TYPE_TAGS.map(t => (
-            <button key={t} style={{...s.typeChip,...(activeFilters.has(t)?s.typeChipActive:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>
-          ))}
+          {allMealTypes.map(t=><button key={t} style={{...s.typeChip,...(activeFilters.has(t)?s.typeChipActive:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>)}
         </div>
-        <div style={{...s.typeFilters, marginTop:6}}>
-          {DIET_TAGS.map(t => (
-            <button key={t} style={{...s.typeChip,...s.typeChipDiet,...(activeFilters.has(t)?s.typeChipDietActive:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>
-          ))}
-        </div>
-        {activeFilters.size > 0 && (
-          <div style={s.activeFilterRow}>
-            <span style={s.activeFilterLbl}>{activeFilters.size} filter{activeFilters.size>1?"s":""} active</span>
-            <button style={s.activeFilterClear} className="clear-filter-btn" onClick={clearFilters}>Clear all</button>
-          </div>
-        )}
+        <FilterRow tags={allDietTags}  chipStyle={s.typeChipDiet}    activeStyle={s.typeChipDietActive} />
+        <FilterRow tags={allCuisines}  chipStyle={s.typeChipCuisine} activeStyle={s.typeChipCuisineActive} />
+        {activeFilters.size>0 && <div style={s.activeFilterRow}><span style={s.activeFilterLbl}>{activeFilters.size} filter{activeFilters.size>1?"s":""} active</span><button style={s.activeFilterClear} className="clear-filter-btn" onClick={clearFilters}>Clear all</button></div>}
       </div>
 
-      {recipes.length === 0 ? (
+      {recipes.length===0 ? (
         <div style={s.recipeEmpty}>
           <div style={s.recipeEmptyIcon}>📖</div>
           <div style={s.recipeEmptyTitle}>No recipes yet</div>
           <div style={s.recipeEmptyText}>Add your first recipe and it'll show up as a suggestion in the planner.</div>
           <button style={s.btnSave} onClick={onNew}>Add First Recipe</button>
         </div>
-      ) : filtered.length === 0 ? (
-        <div style={s.recipeEmpty}>
-          <div style={s.recipeEmptyIcon}>🔍</div>
-          <div style={s.recipeEmptyTitle}>No matches</div>
-          <div style={s.recipeEmptyText}>Try a different search or filter.</div>
-        </div>
+      ) : filtered.length===0 ? (
+        <div style={s.recipeEmpty}><div style={s.recipeEmptyIcon}>🔍</div><div style={s.recipeEmptyTitle}>No matches</div><div style={s.recipeEmptyText}>Try a different search or filter.</div></div>
       ) : (
         <div style={s.recipeGrid}>
-          {filtered.map(r => (
-            <button key={r.id} style={s.recipeCard} className="recipe-card" onClick={()=>onSelect(r)}>
-              <div style={s.recipeCardTop}>
-                <div style={s.recipeCardName}>{r.name}</div>
-                {(r.prepTime||r.cookTime) && (
-                  <div style={s.recipeCardTimes}>
-                    {r.prepTime && <span style={s.recipeTime}>⏱ {r.prepTime} prep</span>}
-                    {r.cookTime && <span style={s.recipeTime}>🔥 {r.cookTime} cook</span>}
+          {filtered.map(r => {
+            const total = formatMinutes(parseMinutes(r.prepTime)+parseMinutes(r.cookTime));
+            return (
+              <button key={r.id} style={s.recipeCard} className="recipe-card" onClick={()=>onSelect(r)}>
+                {r.photo
+                  ? <img src={r.photo} style={s.recipeCardPhoto} alt={r.name} />
+                  : <div style={s.recipeCardPhotoPlaceholder}><span style={{fontSize:28}}>🍽</span></div>}
+                <div style={s.recipeCardContent}>
+                  <div style={s.recipeCardName}>{r.name}</div>
+                  {total && <div style={s.recipeCardTime}>⏱ {total}</div>}
+                  {r.description && <div style={s.recipeCardDesc}>{r.description}</div>}
+                  <div style={s.recipeCardTags}>
+                    {r.mealTypes.map(t=><span key={t} style={{...s.tag,...s.tagMeal}}>{t}</span>)}
+                    {(r.cuisineTags||[]).slice(0,1).map(t=><span key={t} style={{...s.tag,...s.tagCuisine}}>{t}</span>)}
+                    {r.dietTags.slice(0,1).map(t=><span key={t} style={{...s.tag,...s.tagDiet}}>{t}</span>)}
                   </div>
-                )}
-                {r.description && <div style={s.recipeCardDesc}>{r.description}</div>}
-              </div>
-              <div style={s.recipeCardBottom}>
-                <div style={s.recipeCardTags}>
-                  {r.mealTypes.map(t=><span key={t} style={{...s.tag,...s.tagMeal}}>{t}</span>)}
-                  {r.dietTags.slice(0,2).map(t=><span key={t} style={{...s.tag,...s.tagDiet}}>{t}</span>)}
-                  {r.dietTags.length>2 && <span style={{...s.tag,...s.tagDiet}}>+{r.dietTags.length-2}</span>}
                 </div>
-                {r.url && <span style={s.recipeCardLink}>🔗</span>}
-              </div>
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -1067,6 +1123,9 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
         </div>
       </div>
 
+      {/* Hero photo */}
+      {recipe.photo && <img src={recipe.photo} style={s.detailHero} alt={recipe.name} />}
+
       <div style={s.detailBody}>
         {/* Name + meta */}
         <h1 style={s.detailTitle}>{recipe.name}</h1>
@@ -1075,20 +1134,28 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
         <div style={s.detailMeta}>
           {recipe.prepTime && <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>⏱</span><div><div style={s.detailMetaVal}>{recipe.prepTime}</div><div style={s.detailMetaLbl}>Prep</div></div></div>}
           {recipe.cookTime && <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>🔥</span><div><div style={s.detailMetaVal}>{recipe.cookTime}</div><div style={s.detailMetaLbl}>Cook</div></div></div>}
+          {(()=>{ const t=formatMinutes(parseMinutes(recipe.prepTime)+parseMinutes(recipe.cookTime)); return t ? <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>⏱</span><div><div style={s.detailMetaVal}>{t}</div><div style={s.detailMetaLbl}>Total</div></div></div> : null; })()}
           <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>🍽</span><div><div style={s.detailMetaVal}>{recipe.baseServings}</div><div style={s.detailMetaLbl}>Serves</div></div></div>
         </div>
 
         {/* Tags */}
-        {(recipe.mealTypes.length>0||recipe.dietTags.length>0) && (
+        {(recipe.mealTypes.length>0||recipe.dietTags.length>0||(recipe.cuisineTags||[]).length>0) && (
           <div style={s.detailTags}>
             {recipe.mealTypes.map(t=><span key={t} style={{...s.tag,...s.tagMeal}}>{t}</span>)}
+            {(recipe.cuisineTags||[]).map(t=><span key={t} style={{...s.tag,...s.tagCuisine}}>{t}</span>)}
             {recipe.dietTags.map(t=><span key={t} style={{...s.tag,...s.tagDiet}}>{t}</span>)}
           </div>
         )}
 
         {/* URL */}
-        {recipe.url && (
-          <a href={recipe.url} target="_blank" rel="noopener noreferrer" style={s.detailUrl}>🔗 View original recipe</a>
+        {recipe.url && <a href={recipe.url} target="_blank" rel="noopener noreferrer" style={s.detailUrl}>🔗 View original recipe</a>}
+
+        {/* Notes */}
+        {recipe.notes && (
+          <div style={s.detailSection}>
+            <div style={s.detailSectionTitle}>Notes</div>
+            <p style={s.detailNotes}>{recipe.notes}</p>
+          </div>
         )}
 
         {/* Serving scaler */}
@@ -1164,8 +1231,9 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
   const removeStep = (id) => set("steps", r.steps.filter(st=>st.id!==id));
   const updateStep = (id, val) => set("steps", r.steps.map(st=>st.id===id?{...st,text:val}:st));
 
-  const toggleMealType = (t) => set("mealTypes", r.mealTypes.includes(t)?r.mealTypes.filter(x=>x!==t):[...r.mealTypes,t]);
-  const toggleDietTag = (t) => set("dietTags", r.dietTags.includes(t)?r.dietTags.filter(x=>x!==t):[...r.dietTags,t]);
+  const toggleMealType   = (t) => set("mealTypes",   r.mealTypes.includes(t)   ? r.mealTypes.filter(x=>x!==t)   : [...r.mealTypes, t]);
+  const toggleDietTag    = (t) => set("dietTags",    r.dietTags.includes(t)    ? r.dietTags.filter(x=>x!==t)    : [...r.dietTags, t]);
+  const toggleCuisineTag = (t) => set("cuisineTags", (r.cuisineTags||[]).includes(t) ? (r.cuisineTags||[]).filter(x=>x!==t) : [...(r.cuisineTags||[]), t]);
 
   const canSave = r.name.trim().length > 0;
 
@@ -1178,6 +1246,27 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
       </div>
 
       <div style={s.editorBody}>
+        {/* Photo */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Photo</label>
+          {r.photo && (
+            <div style={{position:"relative",marginBottom:8}}>
+              <img src={r.photo} style={{width:"100%",height:180,objectFit:"cover",borderRadius:10}} alt="recipe" />
+              <button style={s.photoRemoveBtn} onClick={()=>set("photo","")}>✕</button>
+            </div>
+          )}
+          <div style={s.photoActions}>
+            <label style={s.photoUploadBtn}>
+              📷 {r.photo?"Change photo":"Upload photo"}
+              <input type="file" accept="image/*" style={{display:"none"}} onChange={async e=>{const f=e.target.files?.[0];if(f)set("photo",await resizeImage(f));e.target.value="";}} />
+            </label>
+            <span style={s.photoOrText}>or</span>
+            <input style={{...s.editorInput,flex:1,fontSize:12}} placeholder="Paste image URL…"
+              onBlur={e=>{const v=e.target.value.trim();if(v.startsWith("http"))set("photo",v);}}
+              onKeyDown={e=>{if(e.key==="Enter"){const v=e.currentTarget.value.trim();if(v.startsWith("http"))set("photo",v);}}} />
+          </div>
+        </div>
+
         {/* Name */}
         <div style={s.editorField}>
           <label style={s.editorLabel}>Recipe Name *</label>
@@ -1188,6 +1277,12 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
         <div style={s.editorField}>
           <label style={s.editorLabel}>Description</label>
           <textarea style={s.editorTextarea} placeholder="A short description…" value={r.description} onChange={e=>set("description",e.target.value)} rows={2} />
+        </div>
+
+        {/* Notes */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Notes</label>
+          <textarea style={s.editorTextarea} placeholder="Tips, substitutions, things to remember…" value={r.notes||""} onChange={e=>set("notes",e.target.value)} rows={3} />
         </div>
 
         {/* URL */}
@@ -1215,26 +1310,22 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel }) {
             </div>
           </div>
         </div>
+        {(()=>{const t=formatMinutes(parseMinutes(r.prepTime)+parseMinutes(r.cookTime));return t?<div style={{fontSize:11,color:"#89c4a1",marginTop:-8,marginBottom:4,fontFamily:"'DM Sans',sans-serif"}}>⏱ Total: {t}</div>:null;})()}
 
         {/* Meal Types */}
-        <div style={s.editorField}>
-          <label style={s.editorLabel}>Meal Type</label>
-          <div style={s.tagPicker}>
-            {MEAL_TYPE_TAGS.map(t=>(
-              <button key={t} style={{...s.tagPickerChip,...(r.mealTypes.includes(t)?s.tagPickerChipOn:{})}} className="tag-chip" onClick={()=>toggleMealType(t)}>{t}</button>
-            ))}
-          </div>
-        </div>
+        <TagPicker label="Meal Type" defaultTags={MEAL_TYPE_TAGS} customKey="mealtypes"
+          selected={r.mealTypes} onToggle={toggleMealType}
+          chipActiveStyle={s.tagPickerChipOn} />
 
         {/* Diet Tags */}
-        <div style={s.editorField}>
-          <label style={s.editorLabel}>Dietary Tags</label>
-          <div style={s.tagPicker}>
-            {DIET_TAGS.map(t=>(
-              <button key={t} style={{...s.tagPickerChip,...(r.dietTags.includes(t)?s.tagPickerDietOn:{})}} className="tag-chip" onClick={()=>toggleDietTag(t)}>{t}</button>
-            ))}
-          </div>
-        </div>
+        <TagPicker label="Dietary Tags" defaultTags={DIET_TAGS} customKey="diets"
+          selected={r.dietTags} onToggle={toggleDietTag}
+          chipActiveStyle={s.tagPickerDietOn} />
+
+        {/* Cuisine Tags */}
+        <TagPicker label="Cuisine" defaultTags={CUISINE_TAGS} customKey="cuisines"
+          selected={r.cuisineTags||[]} onToggle={toggleCuisineTag}
+          chipActiveStyle={s.tagPickerCuisineOn} />
 
         {/* Ingredients */}
         <div style={s.editorField}>
@@ -1471,10 +1562,13 @@ const s = {
   recipeEmptyTitle: { fontSize:18, fontWeight:700, color:"#c8a878" },
   recipeEmptyText: { fontSize:13, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", maxWidth:280, lineHeight:1.5 },
 
-  recipeGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))", gap:10 },
-  recipeCard: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:14, padding:"14px 13px", cursor:"pointer", textAlign:"left", display:"flex", flexDirection:"column", justifyContent:"space-between", gap:10, transition:"border-color 0.2s,transform 0.15s" },
-  recipeCardTop: { display:"flex", flexDirection:"column", gap:5 },
-  recipeCardName: { fontSize:15, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", lineHeight:1.2 },
+  recipeGrid: { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))", gap:10 },
+  recipeCard: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:14, cursor:"pointer", textAlign:"left", display:"flex", flexDirection:"column", overflow:"hidden", transition:"border-color 0.2s,transform 0.15s" },
+  recipeCardPhoto: { width:"100%", height:120, objectFit:"cover", display:"block" },
+  recipeCardPhotoPlaceholder: { width:"100%", height:100, background:"#2e2418", display:"flex", alignItems:"center", justifyContent:"center" },
+  recipeCardContent: { padding:"10px 12px 12px", display:"flex", flexDirection:"column", gap:5, flex:1, justifyContent:"space-between" },
+  recipeCardName: { fontSize:14, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", lineHeight:1.2 },
+  recipeCardTime: { fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
   recipeCardTimes: { display:"flex", gap:8, flexWrap:"wrap" },
   recipeTime: { fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
   recipeCardDesc: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" },
@@ -1485,6 +1579,18 @@ const s = {
   tag: { fontSize:10, borderRadius:8, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
   tagMeal: { background:"#2e2c18", color:"#c8b840", border:"1px solid #4a4428" },
   tagDiet: { background:"#1e2e20", color:"#78b878", border:"1px solid #2e4a30" },
+  tagCuisine: { background:"#1e2438", color:"#7898d8", border:"1px solid #2e3858" },
+  detailHero: { width:"100%", height:220, objectFit:"cover", display:"block" },
+  detailNotes: { fontSize:13, color:"#c0a880", fontFamily:"'DM Sans',sans-serif", lineHeight:1.6, margin:0, whiteSpace:"pre-wrap" },
+  typeChipCuisine: { background:"#1e2438", color:"#7898d8", border:"1px solid #2e3858" },
+  typeChipCuisineActive: { background:"#2e3858", color:"#a8c8f8", border:"1px solid #7898d8" },
+  tagPickerCuisineOn: { background:"#2e3858", border:"1.5px solid #7898d8", color:"#a8c8f8" },
+  addCustomChip: { background:"none", border:"1.5px dashed #3a2e22", borderRadius:20, padding:"7px 14px", fontSize:13, color:"#6a5a48", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  customTagRow: { display:"flex", gap:8, marginTop:6, alignItems:"center" },
+  photoActions: { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
+  photoUploadBtn: { display:"inline-flex", alignItems:"center", gap:6, background:"#2e2418", border:"1px solid #4a3c2a", borderRadius:8, padding:"8px 14px", fontSize:13, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, whiteSpace:"nowrap" },
+  photoOrText: { fontSize:12, color:"#6a5a48", fontFamily:"'DM Sans',sans-serif" },
+  photoRemoveBtn: { position:"absolute", top:6, right:6, background:"rgba(0,0,0,0.6)", border:"none", borderRadius:20, color:"#fff", fontSize:12, cursor:"pointer", padding:"3px 8px" },
 
   // Recipe Detail
   recipeDetailRoot: { minHeight:"100%", background:"#1c1712" },
