@@ -56,6 +56,53 @@ const getWeeksInMonth = (year, month) => {
 
 const getTodayName = () => ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
 
+const MEAL_HOURS = { Breakfast: 8, Lunch: 12, Dinner: 19 };
+
+const wmoEmoji = (code) => {
+  if (code === 0) return "☀️";
+  if (code <= 2) return "🌤️";
+  if (code === 3) return "☁️";
+  if (code <= 48) return "🌫️";
+  if (code <= 55) return "🌦️";
+  if (code <= 67) return "🌧️";
+  if (code <= 77) return "❄️";
+  if (code <= 82) return "🌧️";
+  if (code <= 86) return "❄️";
+  return "⛈️";
+};
+
+const fetchWeather = async (lat, lon, startDate, endDate) => {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `&daily=weathercode,temperature_2m_max,temperature_2m_min` +
+    `&hourly=temperature_2m,weathercode&temperature_unit=fahrenheit` +
+    `&timezone=auto&start_date=${startDate}&end_date=${endDate}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error("Weather fetch failed");
+  const data = await r.json();
+  const result = {};
+  data.daily.time.forEach((date, i) => {
+    result[date] = {
+      high: Math.round(data.daily.temperature_2m_max[i]),
+      low: Math.round(data.daily.temperature_2m_min[i]),
+      icon: wmoEmoji(data.daily.weathercode[i]),
+      meals: {},
+    };
+  });
+  data.hourly.time.forEach((timeStr, i) => {
+    const [date, hourStr] = timeStr.split("T");
+    const hour = parseInt(hourStr);
+    if (!result[date]) return;
+    for (const [meal, mealHour] of Object.entries(MEAL_HOURS)) {
+      if (hour === mealHour) {
+        result[date].meals[meal] = {
+          temp: Math.round(data.hourly.temperature_2m[i]),
+          icon: wmoEmoji(data.hourly.weathercode[i]),
+        };
+      }
+    }
+  });
+  return result;
+};
 
 const openCalendarEvent = (mealName, slot, dayName, thawDays, ws) => {
   const mealDate = getDateForDay(dayName, ws);
@@ -141,6 +188,8 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
   const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
   const [nextWeekMeals, setNextWeekMeals] = useState(initialWeek());
+  const [location, setLocation] = useState(() => { try { const s = localStorage.getItem("mealplanner_loc"); return s ? JSON.parse(s) : null; } catch { return null; } });
+  const [weatherData, setWeatherData] = useState({});
   const isLoadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
   const mealTimer = useRef(null);
@@ -190,6 +239,28 @@ export default function App() {
     setDesserts([]);
     loadAll();
   }, [viewedWeekStart]);
+
+  // One-time geolocation prompt
+  useEffect(() => {
+    if (location || !navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(pos => {
+      const loc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      localStorage.setItem("mealplanner_loc", JSON.stringify(loc));
+      setLocation(loc);
+    }, () => {});
+  }, []);
+
+  // Fetch weather when location or viewed week changes
+  useEffect(() => {
+    if (!location) return;
+    const today = new Date(); today.setHours(0,0,0,0);
+    const wkEnd = new Date(viewedWeekStart + "T00:00:00"); wkEnd.setDate(wkEnd.getDate()+6);
+    const maxDate = new Date(today); maxDate.setDate(today.getDate()+15);
+    if (wkEnd < today || new Date(viewedWeekStart + "T00:00:00") > maxDate) { setWeatherData({}); return; }
+    const endDate = wkEnd > maxDate ? maxDate.toISOString().split("T")[0] : wkEnd.toISOString().split("T")[0];
+    fetchWeather(location.lat, location.lon, viewedWeekStart, endDate)
+      .then(setWeatherData).catch(() => setWeatherData({}));
+  }, [location, viewedWeekStart]);
 
   // Background poll every 20s
   useEffect(() => {
@@ -332,6 +403,7 @@ export default function App() {
             syncStatus={syncStatus}
             viewedWeekStart={viewedWeekStart}
             nextWeekMeals={nextWeekMeals}
+            weatherData={weatherData}
             onPrevWeek={() => setViewedWeekStart(ws => addWeeks(ws, -1))}
             onNextWeek={() => setViewedWeekStart(ws => addWeeks(ws, 1))}
             onGoToWeek={(ws) => setViewedWeekStart(ws)}
@@ -383,7 +455,7 @@ function ThawItemRow({ item }) {
 // ─── Planner View ─────────────────────────────────────────────────────────────
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
+function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, weatherData, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
   const [modal, setModal] = useState(null);
   const [inputVal, setInputVal] = useState("");
   const [thawOn, setThawOn] = useState(false);
@@ -627,12 +699,15 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
             const hasThaw = MEAL_SLOTS.some(sl=>week[day][sl].meal&&week[day][sl].thaw);
             const hasMeals = MEAL_SLOTS.some(sl=>week[day][sl].meal);
             const isDayCopying = dayCopyDay===day;
+            const dayKey = getDateForDay(day, viewedWeekStart).toISOString().split("T")[0];
+            const dayWeather = weatherData[dayKey];
             return (
               <div key={day} style={{...s.card,...(isToday?s.cardToday:{}),...(hasThaw?s.cardThaw:{})}} className="day-card">
                 <div style={s.cardHead}>
-                  <div style={{display:"flex",alignItems:"baseline",gap:5}}>
+                  <div style={{display:"flex",alignItems:"baseline",gap:5,flexWrap:"wrap"}}>
                     <span style={{...s.dayName,...(isToday?s.dayNameToday:{})}}>{day.slice(0,3).toUpperCase()}</span>
                     <span style={s.dayDate}>{getDateForDay(day, viewedWeekStart).toLocaleDateString("en-US",{month:"short",day:"numeric"})}</span>
+                    {dayWeather && <span style={s.dayWeather}>{dayWeather.icon} {dayWeather.high}°/{dayWeather.low}°</span>}
                   </div>
                   <div style={s.cardBadges}>
                     {hasThaw && <span style={s.thawBadge}>🧊</span>}
@@ -664,6 +739,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                     const entry = week[day][slot]; const val = entry.meal;
                     const linkedRecipeForCard = entry.recipeId ? recipes.find(r => r.id === entry.recipeId) : null;
                     const hasLinkedRecipe = !!linkedRecipeForCard;
+                    const mealWeather = dayWeather?.meals[slot];
                     return (
                       <div key={slot}
                         style={{...s.slot,...(val?s.slotFilled:s.slotEmpty),...(val&&entry.thaw?s.slotThaw:{}),...(linkedRecipeForCard?s.slotHasRecipe:{})}}
@@ -671,9 +747,12 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                       >
                         <span style={{...s.dot,background:slotColors[slot],flexShrink:0,marginTop:2,alignSelf:"flex-start"}} />
                         <div style={{flex:1,minWidth:0}}>
-                          <div style={{display:"flex",alignItems:"center",gap:4}}>
-                            <span style={s.slotLbl}>{slot}</span>
-                            {val&&entry.thaw && <span style={{fontSize:9}}>🧊</span>}
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:4}}>
+                            <div style={{display:"flex",alignItems:"center",gap:4}}>
+                              <span style={s.slotLbl}>{slot}</span>
+                              {val&&entry.thaw && <span style={{fontSize:9}}>🧊</span>}
+                            </div>
+                            {mealWeather && <span style={s.slotWeather}>{mealWeather.icon} {mealWeather.temp}°</span>}
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
                             {val ? <span style={s.slotMeal}>{val}</span> : <span style={s.slotPlaceholder}>+ Add</span>}
@@ -1277,6 +1356,8 @@ const s = {
   dayName: { fontSize:12, fontWeight:700, letterSpacing:"0.1em", color:"#c8a878", fontFamily:"'DM Sans',sans-serif" },
   dayNameToday: { color:"#f4c97a" },
   dayDate: { fontSize:10, color:"#7a6448", fontFamily:"'DM Sans',sans-serif" },
+  dayWeather: { fontSize:10, color:"#a09878", fontFamily:"'DM Sans',sans-serif" },
+  slotWeather: { fontSize:10, color:"#a09878", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
   thawBadge: { fontSize:12 },
   todayBadge: { fontSize:10, background:"#f4c97a22", color:"#f4c97a", border:"1px solid #f4c97a55", borderRadius:10, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif" },
   slots: { display:"flex", flexDirection:"column", gap:5 },
