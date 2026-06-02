@@ -21,26 +21,44 @@ const initialWeek = () => {
   return w;
 };
 
-const getWeekRange = () => {
-  const now = new Date(); const dow = now.getDay();
-  const mon = new Date(now); mon.setDate(now.getDate() - (dow===0?6:dow-1));
-  const sun = new Date(mon); sun.setDate(mon.getDate()+6);
-  const fmt = d => d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
-  return `${fmt(mon)} – ${fmt(sun)}`;
+const addWeeks = (ws, n) => {
+  const d = new Date(ws + "T00:00:00"); d.setDate(d.getDate() + n * 7);
+  return d.toISOString().split("T")[0];
 };
 
-const getDateForDay = (dayName) => {
-  const now = new Date(); const dow = now.getDay();
-  const mon = new Date(now); mon.setDate(now.getDate()-(dow===0?6:dow-1));
-  const d = new Date(mon); d.setDate(mon.getDate()+DAYS.indexOf(dayName));
+const getWeekRange = (ws) => {
+  const mon = new Date(ws + "T00:00:00");
+  const sun = new Date(ws + "T00:00:00"); sun.setDate(mon.getDate() + 6);
+  const fmt = d => d.toLocaleDateString("en-US", {month:"short", day:"numeric"});
+  const currentYear = new Date().getFullYear();
+  const yearStr = (mon.getFullYear() !== currentYear || sun.getFullYear() !== currentYear) ? ` ${sun.getFullYear()}` : "";
+  return `${fmt(mon)} – ${fmt(sun)}${yearStr}`;
+};
+
+const getDateForDay = (dayName, ws) => {
+  const mon = new Date(ws + "T00:00:00");
+  const d = new Date(mon); d.setDate(mon.getDate() + DAYS.indexOf(dayName));
   return d;
+};
+
+const getWeeksInMonth = (year, month) => {
+  const firstDay = new Date(year, month, 1);
+  const lastDay = new Date(year, month + 1, 0);
+  const dow = firstDay.getDay();
+  const mon = new Date(firstDay); mon.setDate(firstDay.getDate() - (dow === 0 ? 6 : dow - 1));
+  const weeks = [];
+  while (mon <= lastDay) {
+    weeks.push(mon.toISOString().split("T")[0]);
+    mon.setDate(mon.getDate() + 7);
+  }
+  return weeks;
 };
 
 const getTodayName = () => ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][new Date().getDay()];
 
 
-const openCalendarEvent = (mealName, slot, dayName, thawDays) => {
-  const mealDate = getDateForDay(dayName);
+const openCalendarEvent = (mealName, slot, dayName, thawDays, ws) => {
+  const mealDate = getDateForDay(dayName, ws);
   const thawDate = new Date(mealDate); thawDate.setDate(mealDate.getDate()-thawDays);
   const thawDateEnd = new Date(thawDate); thawDateEnd.setDate(thawDate.getDate()+1);
   const fmt = d => `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,"0")}${String(d.getDate()).padStart(2,"0")}`;
@@ -121,14 +139,17 @@ export default function App() {
   const [snacks, setSnacks] = useState([]);
   const [desserts, setDesserts] = useState([]);
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
+  const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
   const isLoadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
   const mealTimer = useRef(null);
   const extrasTimer = useRef(null);
   const recipesRef = useRef(recipes);
   const isRestoringRef = useRef(false);
+  const viewedWeekStartRef = useRef(weekStart());
 
   useEffect(() => { recipesRef.current = recipes; }, [recipes]);
+  useEffect(() => { viewedWeekStartRef.current = viewedWeekStart; }, [viewedWeekStart]);
 
   const navigate = (newTab: string, newView: any) => {
     setTab(newTab);
@@ -158,9 +179,19 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  // Reload when viewed week changes
   useEffect(() => {
     if (!isConfigured) return;
+    hasLoadedRef.current = false;
+    setWeek(initialWeek());
+    setSnacks([]);
+    setDesserts([]);
     loadAll();
+  }, [viewedWeekStart]);
+
+  // Background poll every 20s
+  useEffect(() => {
+    if (!isConfigured) return;
     const id = setInterval(loadAll, 20000);
     return () => clearInterval(id);
   }, []);
@@ -183,7 +214,7 @@ export default function App() {
     try {
       isLoadingRef.current = true;
       setSyncStatus("syncing");
-      const ws = weekStart();
+      const ws = viewedWeekStartRef.current;
 
       const [mealsRows, recipeRows, extrasRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
@@ -227,7 +258,7 @@ export default function App() {
 
   const syncMeals = async (weekData) => {
     try {
-      const ws = weekStart();
+      const ws = viewedWeekStartRef.current;
       const rows = [];
       DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
         const e = weekData[day][slot];
@@ -243,7 +274,7 @@ export default function App() {
 
   const syncExtras = async (snackList, dessertList) => {
     try {
-      const ws = weekStart();
+      const ws = viewedWeekStartRef.current;
       await sb.del("extras", `week_start=eq.${ws}`);
       const rows = [
         ...snackList.map(name => ({ week_start: ws, type: "snack", name })),
@@ -297,6 +328,11 @@ export default function App() {
             snacks={snacks} setSnacks={setSnacks}
             desserts={desserts} setDesserts={setDesserts}
             syncStatus={syncStatus}
+            viewedWeekStart={viewedWeekStart}
+            onPrevWeek={() => setViewedWeekStart(ws => addWeeks(ws, -1))}
+            onNextWeek={() => setViewedWeekStart(ws => addWeeks(ws, 1))}
+            onGoToWeek={(ws) => setViewedWeekStart(ws)}
+            onGoToToday={() => setViewedWeekStart(weekStart())}
             onViewRecipe={(name) => {
               const r = recipes.find(r => r.name.toLowerCase() === name.toLowerCase());
               if (r) navigate("recipes", { recipe: r });
@@ -323,7 +359,9 @@ export default function App() {
 }
 
 // ─── Planner View ─────────────────────────────────────────────────────────────
-function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus }) {
+const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
   const [modal, setModal] = useState(null);
   const [inputVal, setInputVal] = useState("");
   const [thawOn, setThawOn] = useState(false);
@@ -338,7 +376,20 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const [dessertSugOpen, setDessertSugOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const today = getTodayName();
+  const [monthPickerOpen, setMonthPickerOpen] = useState(false);
+  const [pickerYear, setPickerYear] = useState(() => new Date(viewedWeekStart + "T00:00:00").getFullYear());
+  const [pickerMonth, setPickerMonth] = useState(() => new Date(viewedWeekStart + "T00:00:00").getMonth());
+
+  const isCurrentWeek = viewedWeekStart === weekStart();
+  const todayName = getTodayName();
+
+  useEffect(() => {
+    if (monthPickerOpen) {
+      const d = new Date(viewedWeekStart + "T00:00:00");
+      setPickerYear(d.getFullYear());
+      setPickerMonth(d.getMonth());
+    }
+  }, [monthPickerOpen]);
 
   const isRestoringRef = useRef(false);
 
@@ -424,7 +475,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
     const e = week[day][slot];
     if (e.meal && e.thaw) {
-      const md = getDateForDay(day); const td = new Date(md); td.setDate(md.getDate()-e.thawDays);
+      const md = getDateForDay(day, viewedWeekStart); const td = new Date(md); td.setDate(md.getDate()-e.thawDays);
       thawItems.push({ mealName:e.meal, slot, day, thawDays:e.thawDays, thawDate:td });
     }
   }));
@@ -453,7 +504,39 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
           <div style={s.headerTitleBlock}>
             <div style={s.eyebrow}>Weekly Meal Planner</div>
             <h1 style={s.title}>What's Cooking?</h1>
-            <div style={s.weekRange}>{getWeekRange()}</div>
+          </div>
+          {/* Week navigation */}
+          <div style={s.weekNav}>
+            <button style={s.weekNavArrow} onClick={onPrevWeek}>◀</button>
+            <div style={{position:"relative"}}>
+              <button style={s.weekRangeBtn} onClick={() => setMonthPickerOpen(v => !v)}>
+                {getWeekRange(viewedWeekStart)}
+              </button>
+              {monthPickerOpen && (
+                <div style={s.monthPicker}>
+                  <div style={s.monthPickerHead}>
+                    <button style={s.monthNavArrow} onClick={() => { let m=pickerMonth-1,y=pickerYear; if(m<0){m=11;y--;} setPickerMonth(m);setPickerYear(y); }}>◀</button>
+                    <span style={s.monthPickerTitle}>{MONTH_NAMES[pickerMonth]} {pickerYear}</span>
+                    <button style={s.monthNavArrow} onClick={() => { let m=pickerMonth+1,y=pickerYear; if(m>11){m=0;y++;} setPickerMonth(m);setPickerYear(y); }}>▶</button>
+                  </div>
+                  {getWeeksInMonth(pickerYear, pickerMonth).map(ws => {
+                    const isViewed = ws === viewedWeekStart;
+                    const isCurrWeek = ws === weekStart();
+                    return (
+                      <button key={ws} style={{...s.weekPickerRow,...(isViewed?s.weekPickerRowViewed:{}),...(isCurrWeek&&!isViewed?s.weekPickerRowCurrent:{})}}
+                        onClick={() => { onGoToWeek(ws); setMonthPickerOpen(false); }}>
+                        {getWeekRange(ws)}
+                        {isCurrWeek && <span style={s.weekPickerDot}>●</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <button style={s.weekNavArrow} onClick={onNextWeek}>▶</button>
+            {!isCurrentWeek && (
+              <button style={s.todayJumpBtn} onClick={() => { onGoToToday(); setMonthPickerOpen(false); }}>Today</button>
+            )}
           </div>
           {/* Counts centered, Extras pinned right */}
           <div style={s.headerCountsRow}>
@@ -502,7 +585,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                   </div>
                   <div style={s.prepItemRight}>
                     <span style={{...s.prepThawDate,...(isToday?s.prepThawDateUrgent:{})}}>{isToday ? "🚨 Thaw Today!" : `Thaw by ${item.thawDate.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}`}</span>
-                    <button style={s.prepCalBtn} className="cal-btn" onClick={() => openCalendarEvent(item.mealName,item.slot,item.day,item.thawDays)}>📅 Add</button>
+                    <button style={s.prepCalBtn} className="cal-btn" onClick={() => openCalendarEvent(item.mealName,item.slot,item.day,item.thawDays,viewedWeekStart)}>📅 Add</button>
                   </div>
                 </div>
                 );
@@ -516,7 +599,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       <main style={s.main}>
         <div style={s.grid}>
           {DAYS.map(day => {
-            const isToday = day===today;
+            const isToday = isCurrentWeek && day === todayName;
             const hasThaw = MEAL_SLOTS.some(sl=>week[day][sl].meal&&week[day][sl].thaw);
             const hasMeals = MEAL_SLOTS.some(sl=>week[day][sl].meal);
             const isDayCopying = dayCopyDay===day;
@@ -585,6 +668,9 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
           })}
         </div>
       </main>
+
+      {/* MONTH PICKER BACKDROP */}
+      {monthPickerOpen && <div style={s.monthPickerBackdrop} onClick={() => setMonthPickerOpen(false)} />}
 
       {/* EXTRAS PANEL */}
       <div style={{...s.backdrop,...(panelOpen?s.backdropVisible:{})}} onClick={()=>{ setPanelOpen(false); if (!isRestoringRef.current) history.back(); }} />
@@ -705,8 +791,8 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                         <button key={n} style={{...s.thawDayBtn,...(thawDays===n?s.thawDayBtnActive:{})}} className="thaw-day-btn" onClick={()=>setThawDays(n)}>{n} day{n>1?"s":""}</button>
                       ))}
                     </div>
-                    <div style={s.thawPreview}>↳ Thaw by {(()=>{const d=getDateForDay(modal.day);d.setDate(d.getDate()-thawDays);return d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});})()}</div>
-                    <button style={s.thawCalBtn} className="cal-btn" onClick={()=>openCalendarEvent(inputVal.trim(),modal.slot,modal.day,thawDays)}>📅 Add thaw reminder to calendar</button>
+                    <div style={s.thawPreview}>↳ Thaw by {(()=>{const d=getDateForDay(modal.day,viewedWeekStart);d.setDate(d.getDate()-thawDays);return d.toLocaleDateString("en-US",{weekday:"long",month:"short",day:"numeric"});})()}</div>
+                    <button style={s.thawCalBtn} className="cal-btn" onClick={()=>openCalendarEvent(inputVal.trim(),modal.slot,modal.day,thawDays,viewedWeekStart)}>📅 Add thaw reminder to calendar</button>
                   </div>
                 )}
               </div>
@@ -1100,8 +1186,21 @@ const s = {
   header: { background:"linear-gradient(160deg,#2a2118,#1c1712)", borderBottom:"1px solid #3a2e22", padding:"20px 16px 14px", position:"sticky", top:0, zIndex:20, backdropFilter:"blur(12px)" },
   headerInner: { maxWidth:960, margin:"0 auto" },
   headerTopBar: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10 },
-  headerTitleBlock: { textAlign:"center", marginBottom:12 },
+  headerTitleBlock: { textAlign:"center", marginBottom:8 },
   headerCountsRow: { display:"flex", alignItems:"flex-start", gap:16 },
+  weekNav: { display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginBottom:12 },
+  weekNavArrow: { background:"none", border:"1px solid #3a2e22", borderRadius:6, color:"#9a7f60", fontSize:11, padding:"4px 9px", cursor:"pointer", lineHeight:1 },
+  weekRangeBtn: { background:"none", border:"1px solid #3a2e22", borderRadius:8, color:"#f0e0c0", fontSize:13, fontWeight:600, padding:"5px 14px", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
+  todayJumpBtn: { background:"#2a1e12", border:"1px solid #c8a878", borderRadius:6, color:"#c8a878", fontSize:11, fontWeight:700, padding:"4px 10px", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  monthPickerBackdrop: { position:"fixed", inset:0, zIndex:29 },
+  monthPicker: { position:"absolute", top:"calc(100% + 6px)", left:"50%", transform:"translateX(-50%)", background:"#231c14", border:"1px solid #3a2e22", borderRadius:12, padding:"10px", zIndex:30, minWidth:200, boxShadow:"0 8px 32px rgba(0,0,0,0.5)" },
+  monthPickerHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 },
+  monthPickerTitle: { fontSize:13, fontWeight:700, color:"#f4e4c4", fontFamily:"'DM Sans',sans-serif" },
+  monthNavArrow: { background:"none", border:"none", color:"#9a7f60", fontSize:12, cursor:"pointer", padding:"2px 6px" },
+  weekPickerRow: { display:"flex", alignItems:"center", justifyContent:"space-between", width:"100%", background:"none", border:"none", borderRadius:7, padding:"7px 10px", fontSize:12, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left" },
+  weekPickerRowViewed: { background:"#3d3020", color:"#f4e4c4" },
+  weekPickerRowCurrent: { color:"#89c4a1" },
+  weekPickerDot: { fontSize:8, color:"#89c4a1", marginLeft:4 },
   eyebrow: { fontSize:11, letterSpacing:"0.15em", textTransform:"uppercase", color:"#a08060", marginBottom:3, fontFamily:"'DM Sans',sans-serif" },
   title: { margin:0, fontSize:"clamp(22px,5vw,34px)", fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.02em", lineHeight:1.1 },
   weekRange: { fontSize:12, color:"#9a7f60", marginTop:3, fontFamily:"'DM Sans',sans-serif" },
