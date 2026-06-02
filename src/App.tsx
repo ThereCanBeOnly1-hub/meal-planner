@@ -345,13 +345,13 @@ export default function App() {
       const ws = viewedWeekStartRef.current;
 
       const nextWs = addWeeks(ws, 1);
-      const [mealsRows, nextMealsRows, recipeRows, extrasRows, settingsRows] = await Promise.all([
+      const [mealsRows, nextMealsRows, recipeRows, extrasRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
         sb.get("meals", `?week_start=eq.${nextWs}`),
         sb.get("recipes", "?order=created_at.asc"),
         sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
-        sb.get("app_settings", "?key=eq.custom_tags"),
       ]);
+      const settingsRows = await sb.get("app_settings", "?key=eq.custom_tags").catch(() => []);
 
       const parseWeekRows = (rows) => {
         const w = initialWeek();
