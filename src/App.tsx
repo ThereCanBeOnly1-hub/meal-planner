@@ -262,25 +262,27 @@ export default function App() {
       .then(setWeatherData).catch(() => setWeatherData({}));
   }, [location, viewedWeekStart]);
 
-  // Background poll every 20s
+  // Background poll every 10s + refresh on tab focus
   useEffect(() => {
     if (!isConfigured) return;
-    const id = setInterval(loadAll, 20000);
-    return () => clearInterval(id);
+    const id = setInterval(loadAll, 10000);
+    const onVisible = () => { if (document.visibilityState === "visible") loadAll(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
 
-  // Sync meals to DB when week changes (debounced 600ms)
+  // Sync meals to DB when week changes (debounced 300ms)
   useEffect(() => {
     if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
     clearTimeout(mealTimer.current);
-    mealTimer.current = setTimeout(() => syncMeals(week), 600);
+    mealTimer.current = setTimeout(() => syncMeals(week), 300);
   }, [week]);
 
-  // Sync extras to DB when snacks/desserts change (debounced 600ms)
+  // Sync extras to DB when snacks/desserts change (debounced 300ms)
   useEffect(() => {
     if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
     clearTimeout(extrasTimer.current);
-    extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 600);
+    extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 300);
   }, [snacks, desserts]);
 
   const loadAll = async () => {
