@@ -122,6 +122,7 @@ export default function App() {
   const [desserts, setDesserts] = useState([]);
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
   const isLoadingRef = useRef(false);
+  const hasLoadedRef = useRef(false);
   const mealTimer = useRef(null);
   const extrasTimer = useRef(null);
   const recipesRef = useRef(recipes);
@@ -141,7 +142,7 @@ export default function App() {
   useEffect(() => {
     history.replaceState({ tab: "planner", recipeId: null, recipeEdit: false }, "");
     const onPopState = (e: PopStateEvent) => {
-      if (!e.state) return;
+      if (!e.state || !e.state.tab) return;
       const { tab: t, recipeId, recipeEdit } = e.state;
       isRestoringRef.current = true;
       setTab(t);
@@ -166,14 +167,14 @@ export default function App() {
 
   // Sync meals to DB when week changes (debounced 600ms)
   useEffect(() => {
-    if (isLoadingRef.current || !isConfigured) return;
+    if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
     clearTimeout(mealTimer.current);
     mealTimer.current = setTimeout(() => syncMeals(week), 600);
   }, [week]);
 
   // Sync extras to DB when snacks/desserts change (debounced 600ms)
   useEffect(() => {
-    if (isLoadingRef.current || !isConfigured) return;
+    if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
     clearTimeout(extrasTimer.current);
     extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 600);
   }, [snacks, desserts]);
@@ -214,6 +215,7 @@ export default function App() {
       setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
       setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
 
+      hasLoadedRef.current = true;
       setSyncStatus("synced");
     } catch (err) {
       console.error("Load error:", err);
