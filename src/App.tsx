@@ -1059,13 +1059,20 @@ function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, selecte
 function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
   const [filter, setFilter] = useState("");
   const [activeFilters, setActiveFilters] = useState(new Set());
+  const [openFilter, setOpenFilter] = useState(null);
 
   const toggleFilter = (tag) => setActiveFilters(prev => { const n=new Set(prev); n.has(tag)?n.delete(tag):n.add(tag); return n; });
-  const clearFilters = () => setActiveFilters(new Set());
+  const resetAll = () => { setFilter(""); setActiveFilters(new Set()); setOpenFilter(null); };
 
   const allMealTypes = [...new Set([...MEAL_TYPE_TAGS, ...(customTags?.mealtypes||[]), ...recipes.flatMap(r=>r.mealTypes)])];
   const allDietTags  = [...new Set([...DIET_TAGS,      ...(customTags?.diets||[]),     ...recipes.flatMap(r=>r.dietTags)])];
   const allCuisines  = [...new Set([...CUISINE_TAGS,   ...(customTags?.cuisines||[]),  ...recipes.flatMap(r=>r.cuisineTags||[])])];
+
+  const filterGroups = [
+    { key:"meal",    label:"Meal",    tags:allMealTypes, activeStyle:s.typeChipActive },
+    { key:"diet",    label:"Diet",    tags:allDietTags,  activeStyle:s.typeChipDietActive },
+    { key:"cuisine", label:"Cuisine", tags:allCuisines,  activeStyle:s.typeChipCuisineActive },
+  ];
 
   const filtered = recipes.filter(r => {
     const matchName = r.name.toLowerCase().includes(filter.toLowerCase());
@@ -1074,11 +1081,7 @@ function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
     return matchName && [...activeFilters].every(f => allTags.includes(f));
   });
 
-  const FilterRow = ({ tags, chipStyle, activeStyle }) => (
-    <div style={s.typeFilters}>
-      {tags.map(t => <button key={t} style={{...s.typeChip,...chipStyle,...(activeFilters.has(t)?activeStyle:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>)}
-    </div>
-  );
+  const hasAny = filter || activeFilters.size > 0;
 
   return (
     <div style={s.recipesRoot}>
@@ -1087,14 +1090,51 @@ function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
         <button style={s.newRecipeBtn} className="new-recipe-btn" onClick={onNew}>+ New</button>
       </div>
       <div style={s.recipeFilters}>
-        <input style={s.recipeSearch} placeholder="🔍  Search recipes…" value={filter} onChange={e=>setFilter(e.target.value)} />
-        <div style={s.typeFilters}>
-          <button style={{...s.typeChip,...(activeFilters.size===0?s.typeChipActive:{})}} className="type-chip" onClick={clearFilters}>All</button>
-          {allMealTypes.map(t=><button key={t} style={{...s.typeChip,...(activeFilters.has(t)?s.typeChipActive:{})}} className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>)}
+        {/* Search + reset */}
+        <div style={s.searchRow}>
+          <input style={{...s.recipeSearch,marginBottom:0,flex:1}} placeholder="🔍  Search recipes…" value={filter} onChange={e=>setFilter(e.target.value)} />
+          {hasAny && <button style={s.resetBtn} onClick={resetAll}>✕ Reset</button>}
         </div>
-        <FilterRow tags={allDietTags}  chipStyle={s.typeChipDiet}    activeStyle={s.typeChipDietActive} />
-        <FilterRow tags={allCuisines}  chipStyle={s.typeChipCuisine} activeStyle={s.typeChipCuisineActive} />
-        {activeFilters.size>0 && <div style={s.activeFilterRow}><span style={s.activeFilterLbl}>{activeFilters.size} filter{activeFilters.size>1?"s":""} active</span><button style={s.activeFilterClear} className="clear-filter-btn" onClick={clearFilters}>Clear all</button></div>}
+
+        {/* Filter group toggles */}
+        <div style={s.filterGroupRow}>
+          {filterGroups.map(({key,label,tags}) => {
+            const count = tags.filter(t=>activeFilters.has(t)).length;
+            const isOpen = openFilter===key;
+            return (
+              <button key={key} style={{...s.filterGroupBtn,...(isOpen||count>0?s.filterGroupBtnActive:{})}}
+                onClick={()=>setOpenFilter(isOpen?null:key)}>
+                {label}
+                {count>0 && <span style={s.filterGroupBadge}>{count}</span>}
+                <span style={{fontSize:9,marginLeft:3,opacity:0.6}}>{isOpen?"▲":"▼"}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Expanded tag panel */}
+        {openFilter && (()=>{
+          const grp = filterGroups.find(g=>g.key===openFilter);
+          return (
+            <div style={s.filterPanel}>
+              {grp.tags.map(t=>(
+                <button key={t} style={{...s.typeChip,...(activeFilters.has(t)?grp.activeStyle:{})}}
+                  className="type-chip" onClick={()=>toggleFilter(t)}>{t}</button>
+              ))}
+            </div>
+          );
+        })()}
+
+        {/* Active filter chips */}
+        {activeFilters.size>0 && (
+          <div style={s.activeChipsRow}>
+            {[...activeFilters].map(t=>(
+              <button key={t} style={s.activeFilterChip} onClick={()=>toggleFilter(t)}>
+                {t} <span style={{opacity:0.6}}>×</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {recipes.length===0 ? (
@@ -1590,6 +1630,15 @@ const s = {
   activeFilterRow: { display:"flex", alignItems:"center", gap:8, marginTop:8, padding:"6px 10px", background:"#1e2418", border:"1px solid #2a3820", borderRadius:8 },
   activeFilterLbl: { flex:1, fontSize:11, color:"#78c878", fontFamily:"'DM Sans',sans-serif" },
   activeFilterClear: { background:"none", border:"none", fontSize:11, color:"#5a8a50", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textDecoration:"underline" },
+  searchRow: { display:"flex", alignItems:"center", gap:8, marginBottom:8 },
+  resetBtn: { background:"#2e1e1e", border:"1px solid #5a3030", borderRadius:7, padding:"7px 12px", fontSize:12, color:"#c07060", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
+  filterGroupRow: { display:"flex", gap:6, marginBottom:6, flexWrap:"wrap" },
+  filterGroupBtn: { display:"flex", alignItems:"center", gap:4, background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"7px 14px", fontSize:12, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  filterGroupBtnActive: { background:"#2e2418", border:"1px solid #c8a878", color:"#f4c97a" },
+  filterGroupBadge: { background:"#c8a878", color:"#1c1712", borderRadius:10, padding:"0 5px", fontSize:10, fontWeight:700 },
+  filterPanel: { display:"flex", flexWrap:"wrap", gap:6, background:"#1c1712", border:"1px solid #3a2e22", borderRadius:10, padding:"10px", marginBottom:6 },
+  activeChipsRow: { display:"flex", flexWrap:"wrap", gap:6, marginTop:2 },
+  activeFilterChip: { display:"flex", alignItems:"center", gap:4, background:"#2e2418", border:"1px solid #c8a878", borderRadius:20, padding:"4px 10px", fontSize:11, color:"#f4c97a", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
   typeChipDietActive: { background:"#1e3a1e", border:"1.5px solid #4a8a4a", color:"#78c878" },
   slotRecipeBtn: { display:"inline-flex", alignItems:"center", gap:4, background:"#2a1e40", border:"1px solid #5a3888", borderRadius:5, fontSize:10, cursor:"pointer", padding:"3px 7px", color:"#d4b8f8", fontFamily:"'DM Sans',sans-serif", fontWeight:700, lineHeight:1 },
 
