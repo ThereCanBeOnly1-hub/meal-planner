@@ -1917,9 +1917,9 @@ const s = {
   servingsRow: { display:"flex", alignItems:"center", gap:8 },
 
   ingredientList: { display:"flex", flexDirection:"column", gap:8 },
-  ingredientRow: { display:"flex", alignItems:"center", gap:0, padding:"8px 0", borderBottom:"1px solid #2a2018" },
+  ingredientRow: { display:"flex", alignItems:"baseline", gap:0, padding:"8px 0", borderBottom:"1px solid #2a2018" },
   ingredientAmt: { fontSize:13, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", width:44, flexShrink:0, textAlign:"right" as const, paddingRight:8 },
-  ingredientUnit: { fontSize:13, color:"#a08060", fontFamily:"'DM Sans',sans-serif", width:72, flexShrink:0 },
+  ingredientUnit: { fontSize:13, color:"#a08060", fontFamily:"'DM Sans',sans-serif", width:88, flexShrink:0, paddingRight:10, boxSizing:"border-box" as const, whiteSpace:"normal" as const, wordBreak:"break-word" as const, lineHeight:1.3 },
   ingredientName: { fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", flex:1, textAlign:"left" as const },
 
   stepList: { display:"flex", flexDirection:"column" },
