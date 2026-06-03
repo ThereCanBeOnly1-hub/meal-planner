@@ -1226,14 +1226,6 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
         {/* URL */}
         {recipe.url && <a href={/^https?:\/\//i.test(recipe.url) ? recipe.url : `https://${recipe.url}`} target="_blank" rel="noopener noreferrer" style={s.detailUrl}>🔗 View original recipe</a>}
 
-        {/* Notes */}
-        {recipe.notes && (
-          <div style={s.detailSection}>
-            <div style={s.detailSectionTitle}>Notes</div>
-            <p style={s.detailNotes}>{recipe.notes}</p>
-          </div>
-        )}
-
         {/* Serving scaler */}
         {recipe.ingredients.length>0 && recipe.ingredients.some(i=>i.name) && (
           <div style={s.detailSection}>
@@ -1250,8 +1242,8 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
                 const scaledAmt = ing.amount ? scaleAmount(parseFloat(ing.amount)||0, recipe.baseServings, servings) : "";
                 return (
                   <div key={ing.id} style={s.ingredientRow}>
-                    <span style={s.ingredientDot} />
-                    <span style={s.ingredientAmt}>{scaledAmt} {ing.unit}</span>
+                    <span style={s.ingredientAmt}>{scaledAmt}</span>
+                    <span style={s.ingredientUnit}>{ing.unit}</span>
                     <span style={s.ingredientName}>{ing.name}</span>
                   </div>
                 );
@@ -1265,13 +1257,21 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
           <div style={s.detailSection}>
             <div style={s.detailSectionTitle}>Instructions</div>
             <div style={s.stepList}>
-              {recipe.steps.filter(st=>st.text).map((step,i) => (
-                <div key={step.id} style={s.stepRow}>
+              {recipe.steps.filter(st=>st.text).map((step,i,arr) => (
+                <div key={step.id} style={{...s.stepRow,...(i<arr.length-1?s.stepRowDivider:{})}}>
                   <div style={s.stepNum}>{i+1}</div>
                   <div style={s.stepText}>{step.text}</div>
                 </div>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* Notes */}
+        {recipe.notes && (
+          <div style={s.detailSection}>
+            <div style={s.detailSectionTitle}>Notes</div>
+            <p style={s.detailNotes}>{recipe.notes}</p>
           </div>
         )}
       </div>
@@ -1355,12 +1355,6 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
           <textarea style={s.editorTextarea} placeholder="A short description…" value={r.description} onChange={e=>set("description",e.target.value)} rows={2} />
         </div>
 
-        {/* Notes */}
-        <div style={s.editorField}>
-          <label style={s.editorLabel}>Notes</label>
-          <textarea style={s.editorTextarea} placeholder="Tips, substitutions, things to remember…" value={r.notes||""} onChange={e=>set("notes",e.target.value)} rows={3} />
-        </div>
-
         {/* URL */}
         <div style={s.editorField}>
           <label style={s.editorLabel}>Recipe URL (optional)</label>
@@ -1432,6 +1426,12 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
             ))}
             <button style={s.editorAddRowBtn} className="editor-add-btn" onClick={addStep}>+ Add step</button>
           </div>
+        </div>
+
+        {/* Notes */}
+        <div style={s.editorField}>
+          <label style={s.editorLabel}>Notes</label>
+          <textarea style={s.editorTextarea} placeholder="Tips, substitutions, things to remember…" value={r.notes||""} onChange={e=>set("notes",e.target.value)} rows={3} />
         </div>
 
         <div style={{height:40}} />
@@ -1706,15 +1706,16 @@ const s = {
   servingsRow: { display:"flex", alignItems:"center", gap:8 },
 
   ingredientList: { display:"flex", flexDirection:"column", gap:8 },
-  ingredientRow: { display:"flex", alignItems:"center", gap:8, padding:"9px 12px", background:"#241e16", borderRadius:9 },
-  ingredientDot: { width:5, height:5, borderRadius:"50%", background:"#c8a878", flexShrink:0 },
-  ingredientAmt: { fontSize:13, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", minWidth:50 },
-  ingredientName: { fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif" },
+  ingredientRow: { display:"flex", alignItems:"center", gap:0, padding:"8px 0", borderBottom:"1px solid #2a2018" },
+  ingredientAmt: { fontSize:13, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", minWidth:44, textAlign:"right" as const, paddingRight:6 },
+  ingredientUnit: { fontSize:13, color:"#a08060", fontFamily:"'DM Sans',sans-serif", minWidth:48, paddingRight:8 },
+  ingredientName: { fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", flex:1 },
 
-  stepList: { display:"flex", flexDirection:"column", gap:10 },
-  stepRow: { display:"flex", gap:12, alignItems:"flex-start" },
+  stepList: { display:"flex", flexDirection:"column" },
+  stepRow: { display:"flex", gap:12, alignItems:"flex-start", padding:"12px 0", textAlign:"left" as const },
+  stepRowDivider: { borderBottom:"1px solid #2a2018" },
   stepNum: { width:26, height:26, borderRadius:"50%", background:"#3a2e22", color:"#c8a878", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontFamily:"'DM Sans',sans-serif", marginTop:2 },
-  stepText: { fontSize:14, color:"#e0d0b8", fontFamily:"'DM Sans',sans-serif", lineHeight:1.6, flex:1 },
+  stepText: { fontSize:14, color:"#e0d0b8", fontFamily:"'DM Sans',sans-serif", lineHeight:1.6, flex:1, textAlign:"left" as const },
 
   // Recipe Editor
   editorRoot: { minHeight:"100%", background:"#1c1712" },
