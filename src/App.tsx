@@ -172,6 +172,37 @@ const newRecipe = () => ({
   mealTypes: [], dietTags: [], cuisineTags: [],
 });
 
+// Merge a recipe extracted by /api/import-recipe into an editable recipe shape.
+// `photoOverride` lets a photo-import supply the uploaded image as the recipe photo.
+const normalizeImported = (data, photoOverride) => {
+  const base = newRecipe();
+  const now = Date.now();
+  const ings = Array.isArray(data?.ingredients) && data.ingredients.length ? data.ingredients : [{}];
+  const steps = Array.isArray(data?.steps) && data.steps.length ? data.steps : [""];
+  return {
+    ...base,
+    name: data?.name || "",
+    description: data?.description || "",
+    url: typeof data?.url === "string" ? data.url : "",
+    photo: photoOverride || (typeof data?.photo === "string" && data.photo.startsWith("http") ? data.photo : ""),
+    notes: data?.notes || "",
+    prepTime: data?.prepTime || "",
+    cookTime: data?.cookTime || "",
+    baseServings: Number.isFinite(data?.baseServings) && data.baseServings > 0 ? data.baseServings : 4,
+    mealTypes: Array.isArray(data?.mealTypes) ? data.mealTypes : [],
+    dietTags: Array.isArray(data?.dietTags) ? data.dietTags : [],
+    cuisineTags: Array.isArray(data?.cuisineTags) ? data.cuisineTags : [],
+    ingredients: ings.map((ing, i) => ({
+      id: `${now}-i${i}`,
+      amount: ing?.amount || "", unit: ing?.unit || "", name: ing?.name || "",
+    })),
+    steps: steps.map((st, i) => ({
+      id: `${now}-s${i}`,
+      text: typeof st === "string" ? st : (st?.text || ""),
+    })),
+  };
+};
+
 // ─── Supabase Config ─────────────────────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY ?? "";
@@ -1019,7 +1050,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag }) {
   if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
   if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} />;
-  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
+  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
 
 // ─── Tag Picker ───────────────────────────────────────────────────────────────
@@ -1055,14 +1086,139 @@ function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, selecte
   );
 }
 
+// ─── Import Modal ─────────────────────────────────────────────────────────────
+function ImportModal({ onClose, onImported }) {
+  const [mode, setMode] = useState("url"); // "url" | "photo"
+  const [url, setUrl] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const pendingRef = useRef(null); // imported recipe waiting to open after the overlay history entry unwinds
+
+  useEffect(() => {
+    const onPop = () => {
+      if (pendingRef.current) { const r = pendingRef.current; pendingRef.current = null; onImported(r); }
+      else onClose();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [onClose, onImported]);
+
+  // All exits (✕, overlay click, success, Android back) go through history.back()
+  // so the pushed overlay entry is consumed; the popstate handler above finishes the job.
+  const close = () => history.back();
+
+  const callImport = async (payload) => {
+    const resp = await fetch("/api/import-recipe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    let data;
+    try { data = await resp.json(); } catch { data = {}; }
+    if (!resp.ok) throw new Error(data.message || "Import failed. Please try again.");
+    return data.recipe;
+  };
+
+  const importUrl = async () => {
+    const v = url.trim();
+    if (!/^https?:\/\//i.test(v)) { setError("Enter a valid link starting with http(s)://"); return; }
+    setLoading(true); setError("");
+    try {
+      const recipe = await callImport({ type: "url", url: v });
+      pendingRef.current = normalizeImported(recipe);
+      history.back();
+    } catch (e) { setError(e.message); setLoading(false); }
+  };
+
+  const importPhoto = async (file) => {
+    if (!file) return;
+    setLoading(true); setError("");
+    try {
+      // Higher-res copy for OCR accuracy; smaller copy kept as the recipe photo.
+      const [ocrImg, thumbImg] = await Promise.all([resizeImage(file, 1568), resizeImage(file, 600)]);
+      const recipe = await callImport({ type: "photo", imageBase64: ocrImg });
+      pendingRef.current = normalizeImported(recipe, thumbImg);
+      history.back();
+    } catch (e) { setError(e.message); setLoading(false); }
+  };
+
+  return (
+    <div style={s.overlay} onClick={close}>
+      <div style={s.modal} onClick={e => e.stopPropagation()}>
+        <div style={s.modalHead}>
+          <div>
+            <div style={s.modalEyebrow}>✨ Import Recipe</div>
+            <div style={s.modalTitle}>Bring in a recipe</div>
+          </div>
+          <button style={s.modalClose} onClick={close}>✕</button>
+        </div>
+
+        <div style={s.importTabs}>
+          <button style={{...s.importTab, ...(mode==="url"?s.importTabOn:{})}} onClick={()=>{setMode("url");setError("");}}>🔗 From link</button>
+          <button style={{...s.importTab, ...(mode==="photo"?s.importTabOn:{})}} onClick={()=>{setMode("photo");setError("");}}>📷 From photo</button>
+        </div>
+
+        {loading ? (
+          <div style={s.importLoading}>
+            <div style={s.importSpinner}>🍳</div>
+            <div style={s.importLoadingText}>Reading the recipe…</div>
+            <div style={s.importLoadingSub}>This usually takes a few seconds.</div>
+          </div>
+        ) : mode === "url" ? (
+          <>
+            <input style={s.modalInput} placeholder="https://…  paste a recipe link" value={url} autoFocus
+              onChange={e=>setUrl(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")importUrl();}} />
+            <div style={s.importHint}>Works best on recipe sites with a standard recipe page.</div>
+            <button style={{...s.btnSave, ...s.importGoBtn}} onClick={importUrl}>Import from link</button>
+          </>
+        ) : (
+          <>
+            <label style={s.importPhotoDrop}>
+              <div style={{fontSize:30,marginBottom:6}}>📷</div>
+              <div style={s.importPhotoDropText}>Take or choose a photo</div>
+              <div style={s.importPhotoDropSub}>A clear shot of the full recipe page works best.</div>
+              <input type="file" accept="image/*" capture="environment" style={{display:"none"}}
+                onChange={e=>{const f=e.target.files?.[0]; importPhoto(f); e.target.value="";}} />
+            </label>
+          </>
+        )}
+
+        {error && <div style={s.importError}>⚠️ {error}</div>}
+        <div style={s.importDisclaimer}>You'll review and tweak everything before it's saved.</div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Recipe Grid ──────────────────────────────────────────────────────────────
-function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
+function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCustomTag }) {
+  const [showImport, setShowImport] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeFilters, setActiveFilters] = useState(new Set());
   const [openFilter, setOpenFilter] = useState(null);
 
   const toggleFilter = (tag) => setActiveFilters(prev => { const n=new Set(prev); n.has(tag)?n.delete(tag):n.add(tag); return n; });
   const resetAll = () => { setFilter(""); setActiveFilters(new Set()); setOpenFilter(null); };
+
+  // Map imported cuisine/diet tags onto existing tags (case-insensitive); register
+  // any genuinely new ones as custom tags so they show pre-selected in the editor.
+  const reconcileTagList = (tags, defaults, customKey) => {
+    const known = [...defaults, ...(customTags?.[customKey] || [])];
+    const out = [];
+    for (const raw of tags || []) {
+      const v = String(raw).trim();
+      if (!v) continue;
+      const match = known.find(k => k.toLowerCase() === v.toLowerCase());
+      if (match) { if (!out.includes(match)) out.push(match); }
+      else { onAddCustomTag(customKey, v); known.push(v); if (!out.includes(v)) out.push(v); }
+    }
+    return out;
+  };
+  const reconcileImportedTags = (rec) => ({
+    ...rec,
+    cuisineTags: reconcileTagList(rec.cuisineTags, CUISINE_TAGS, "cuisines"),
+    dietTags: reconcileTagList(rec.dietTags, DIET_TAGS, "diets"),
+  });
 
   const allMealTypes = [...new Set([...MEAL_TYPE_TAGS, ...(customTags?.mealtypes||[]), ...recipes.flatMap(r=>r.mealTypes)])];
   const allDietTags  = [...new Set([...DIET_TAGS,      ...(customTags?.diets||[]),     ...recipes.flatMap(r=>r.dietTags)])];
@@ -1087,7 +1243,10 @@ function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
     <div style={s.recipesRoot}>
       <div style={s.recipesHeader}>
         <div><div style={s.eyebrow}>Recipe Library</div><h1 style={s.title}>Your Recipes</h1></div>
-        <button style={s.newRecipeBtn} className="new-recipe-btn" onClick={onNew}>+ New</button>
+        <div style={s.recipesHeaderBtns}>
+          <button style={s.importRecipeBtn} className="import-recipe-btn" onClick={()=>{ setShowImport(true); history.pushState({ overlay: "import" }, ""); }}>✨ Import</button>
+          <button style={s.newRecipeBtn} className="new-recipe-btn" onClick={onNew}>+ New</button>
+        </div>
       </div>
       <div style={s.recipeFilters}>
         {/* Search + reset */}
@@ -1170,6 +1329,8 @@ function RecipeGrid({ recipes, onNew, onSelect, customTags, onAddCustomTag }) {
           })}
         </div>
       )}
+
+      {showImport && <ImportModal onClose={()=>setShowImport(false)} onImported={rec=>{ setShowImport(false); onImported(reconcileImportedTags(rec)); }} />}
     </div>
   );
 }
@@ -1621,6 +1782,23 @@ const s = {
   recipesRoot: { padding:"20px 16px 24px", maxWidth:960, margin:"0 auto" },
   recipesHeader: { display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 },
   newRecipeBtn: { background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", borderRadius:10, padding:"10px 18px", color:"#1c1712", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", flexShrink:0, marginTop:4 },
+  recipesHeaderBtns: { display:"flex", gap:8, flexShrink:0, marginTop:4 },
+  importRecipeBtn: { background:"#2e2418", border:"1px solid #4a3c2a", borderRadius:10, padding:"10px 14px", color:"#f4c97a", fontSize:14, fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", flexShrink:0 },
+
+  importTabs: { display:"flex", gap:6, marginBottom:16 },
+  importTab: { flex:1, background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:10, padding:"10px 8px", color:"#9a7f60", fontSize:13, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  importTabOn: { background:"#2e2418", borderColor:"#c8a878", color:"#f4c97a" },
+  importHint: { fontSize:12, color:"#7a6448", marginBottom:12, fontFamily:"'DM Sans',sans-serif" },
+  importGoBtn: { width:"100%", padding:"12px", fontSize:15 },
+  importPhotoDrop: { display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", background:"#1c1712", border:"1.5px dashed #4a3c2a", borderRadius:12, padding:"28px 16px", cursor:"pointer", marginBottom:4 },
+  importPhotoDropText: { fontSize:15, fontWeight:700, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", marginBottom:3 },
+  importPhotoDropSub: { fontSize:12, color:"#7a6448", fontFamily:"'DM Sans',sans-serif" },
+  importLoading: { display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", padding:"30px 16px" },
+  importSpinner: { fontSize:38, animation:"importPulse 1.2s ease-in-out infinite" },
+  importLoadingText: { fontSize:16, fontWeight:700, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", marginTop:12 },
+  importLoadingSub: { fontSize:12, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", marginTop:4 },
+  importError: { background:"#3a1f1a", border:"1px solid #6a3328", borderRadius:9, padding:"10px 12px", color:"#f0a890", fontSize:13, fontFamily:"'DM Sans',sans-serif", marginTop:12 },
+  importDisclaimer: { fontSize:11, color:"#5a4a38", fontFamily:"'DM Sans',sans-serif", marginTop:14, textAlign:"center" },
   recipeFilters: { marginBottom:16 },
   recipeSearch: { width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:10, padding:"11px 14px", fontSize:15, color:"#f0e8d8", fontFamily:"'Lora',Georgia,serif", outline:"none", boxSizing:"border-box", marginBottom:10 },
   typeFilters: { display:"flex", gap:6, flexWrap:"wrap" },
@@ -1774,6 +1952,8 @@ const css = `
   button.type-chip:focus-visible { outline: none; }
   .tag-chip:hover { opacity: 0.8; }
   .new-recipe-btn:hover { opacity: 0.9; }
+  .import-recipe-btn:hover { border-color: #c8a878 !important; background: #3a2e22 !important; }
+  @keyframes importPulse { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.18);opacity:0.7} }
   .back-btn:hover { color: #c8a878 !important; }
   .detail-edit-btn:hover { background: #3a2e22 !important; border-color: #c8a878 !important; }
   .detail-delete-btn:hover { background: #2a1818 !important; }
