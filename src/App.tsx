@@ -1114,7 +1114,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 
 // ─── Recipes View ─────────────────────────────────────────────────────────────
 function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag }) {
-  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} onDeleteCustomTag={onDeleteCustomTag} />;
+  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(recipes.some(r=>r.id===view.recipe?.id)?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} onDeleteCustomTag={onDeleteCustomTag} />;
   if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} />;
   return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
