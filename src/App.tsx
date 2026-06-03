@@ -231,6 +231,8 @@ export default function App() {
   const [weatherData, setWeatherData] = useState({});
   const isLoadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
+  const syncExtrasLockRef = useRef(false);
+  const lastVisibilityLoadRef = useRef(0);
   const mealTimer = useRef(null);
   const extrasTimer = useRef(null);
   const recipesRef = useRef(recipes);
@@ -305,7 +307,13 @@ export default function App() {
   useEffect(() => {
     if (!isConfigured) return;
     const id = setInterval(loadAll, 10000);
-    const onVisible = () => { if (document.visibilityState === "visible") loadAll(); };
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      if (now - lastVisibilityLoadRef.current < 5000) return;
+      lastVisibilityLoadRef.current = now;
+      loadAll();
+    };
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
@@ -340,6 +348,7 @@ export default function App() {
   };
 
   const loadAll = async () => {
+    if (isLoadingRef.current) return;
     try {
       isLoadingRef.current = true;
       setSyncStatus("syncing");
@@ -408,6 +417,8 @@ export default function App() {
   };
 
   const syncExtras = async (snackList, dessertList) => {
+    if (syncExtrasLockRef.current) return;
+    syncExtrasLockRef.current = true;
     try {
       const ws = viewedWeekStartRef.current;
       await sb.del("extras", `week_start=eq.${ws}`);
@@ -418,6 +429,7 @@ export default function App() {
       if (rows.length > 0) await sb.upsert("extras", rows);
       setSyncStatus("synced");
     } catch (err) { console.error("Sync extras:", err); setSyncStatus("error"); }
+    finally { syncExtrasLockRef.current = false; }
   };
 
   const saveRecipe = async (recipe) => {
