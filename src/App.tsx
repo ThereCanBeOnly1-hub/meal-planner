@@ -168,29 +168,32 @@ const parseQty = (str) => {
   return null;
 };
 
-// Format a number back to a clean fraction string.
+// Format a number to a clean unicode-fraction string, snapping to the nearest
+// common cooking fraction (eighths plus thirds/sixths).
 const formatQty = (n) => {
-  if (n === Math.floor(n)) return String(n);
-  const rounded = Math.round(n * 8) / 8;
+  const rounded = Math.round(n * 1e6) / 1e6;
+  if (Number.isInteger(rounded)) return String(rounded);
   const whole = Math.floor(rounded);
   const frac = rounded - whole;
-  const fracMap = { 0.125:"⅛", 0.25:"¼", 0.375:"⅜", 0.5:"½", 0.625:"⅝", 0.75:"¾", 0.875:"⅞" };
-  if (whole === 0) return fracMap[frac] || rounded.toFixed(2);
-  return frac === 0 ? String(whole) : `${whole}${fracMap[frac]||""}`;
+  const table = [[0,""],[0.125,"⅛"],[1/6,"⅙"],[0.25,"¼"],[1/3,"⅓"],[0.375,"⅜"],[0.5,"½"],[0.625,"⅝"],[2/3,"⅔"],[0.75,"¾"],[0.875,"⅞"],[1,""]];
+  let best = table[0], bestD = Infinity;
+  for (const t of table) { const d = Math.abs(frac - t[0]); if (d <= bestD) { bestD = d; best = t; } } // table ascending: ties round up
+  if (best[0] === 1) return String(whole + 1);          // rounded up to next whole
+  if (best[1] === "") return String(whole);             // rounded down to whole
+  return whole === 0 ? best[1] : `${whole}${best[1]}`;
 };
 
-// Scale an amount string by the servings ratio. Shows the amount exactly as
-// typed when servings are unchanged, handles ranges ("1/4-1/2"), and falls back
-// to the verbatim string if any part isn't a plain number ("a pinch", "to taste").
+// Scale an amount string by the servings ratio and normalize to unicode
+// fractions. Handles ranges ("1/4-1/2") and falls back to the verbatim string
+// if any part isn't a plain number ("a pinch", "to taste").
 const scaleAmount = (amountStr, baseServings, currentServings) => {
   const raw = String(amountStr ?? "").trim();
   if (!raw) return "";
   const factor = baseServings ? currentServings / baseServings : 1;
-  if (factor === 1) return raw;
   const parts = raw.split(/\s*(?:–|—|-|\bto\b)\s*/i);    // split ranges, keep mixed numbers intact
   const nums = parts.map(parseQty);
   if (nums.some(n => n === null)) return raw;
-  return nums.map(n => formatQty(n * factor)).join("-");
+  return nums.map(n => formatQty(n * factor)).join("–");
 };
 
 const newRecipe = () => ({
