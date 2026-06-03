@@ -152,15 +152,45 @@ const openCalendarEvent = (mealName, slot, dayName, thawDays, ws) => {
   window.open(`https://calendar.google.com/calendar/render?${params.toString()}`, "_blank");
 };
 
-const scaleAmount = (amount, baseServings, currentServings) => {
-  const scaled = (amount / baseServings) * currentServings;
-  if (scaled === Math.floor(scaled)) return String(scaled);
-  const rounded = Math.round(scaled * 8) / 8;
+// Parse a single quantity token to a number: "1", "1.5", "1/2", "1 1/2", "½", "1½".
+// Returns null if it isn't a plain numeric quantity (e.g. "a pinch").
+const parseQty = (str) => {
+  const s = String(str).trim();
+  if (!s) return null;
+  const uni = { "⅛":0.125, "¼":0.25, "⅜":0.375, "½":0.5, "⅝":0.625, "¾":0.75, "⅞":0.875, "⅓":1/3, "⅔":2/3, "⅙":1/6 };
+  let m = s.match(/^(\d+)?\s*([⅛¼⅜½⅝¾⅞⅓⅔⅙])$/);        // "½" or "1½" / "1 ½"
+  if (m) return (m[1] ? parseInt(m[1], 10) : 0) + uni[m[2]];
+  m = s.match(/^(\d+)\s+(\d+)\/(\d+)$/);                  // "1 1/2"
+  if (m) return parseInt(m[1], 10) + parseInt(m[2], 10) / parseInt(m[3], 10);
+  m = s.match(/^(\d+)\/(\d+)$/);                          // "1/2"
+  if (m) return parseInt(m[1], 10) / parseInt(m[2], 10);
+  if (/^\d*\.?\d+$/.test(s)) return parseFloat(s);        // "2", "1.5", ".5"
+  return null;
+};
+
+// Format a number back to a clean fraction string.
+const formatQty = (n) => {
+  if (n === Math.floor(n)) return String(n);
+  const rounded = Math.round(n * 8) / 8;
   const whole = Math.floor(rounded);
   const frac = rounded - whole;
   const fracMap = { 0.125:"⅛", 0.25:"¼", 0.375:"⅜", 0.5:"½", 0.625:"⅝", 0.75:"¾", 0.875:"⅞" };
   if (whole === 0) return fracMap[frac] || rounded.toFixed(2);
   return frac === 0 ? String(whole) : `${whole}${fracMap[frac]||""}`;
+};
+
+// Scale an amount string by the servings ratio. Shows the amount exactly as
+// typed when servings are unchanged, handles ranges ("1/4-1/2"), and falls back
+// to the verbatim string if any part isn't a plain number ("a pinch", "to taste").
+const scaleAmount = (amountStr, baseServings, currentServings) => {
+  const raw = String(amountStr ?? "").trim();
+  if (!raw) return "";
+  const factor = baseServings ? currentServings / baseServings : 1;
+  if (factor === 1) return raw;
+  const parts = raw.split(/\s*(?:–|—|-|\bto\b)\s*/i);    // split ranges, keep mixed numbers intact
+  const nums = parts.map(parseQty);
+  if (nums.some(n => n === null)) return raw;
+  return nums.map(n => formatQty(n * factor)).join("-");
 };
 
 const newRecipe = () => ({
@@ -1400,7 +1430,7 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
             </div>
             <div style={s.ingredientList}>
               {recipe.ingredients.filter(i=>i.name).map(ing => {
-                const scaledAmt = ing.amount ? scaleAmount(parseFloat(ing.amount)||0, recipe.baseServings, servings) : "";
+                const scaledAmt = scaleAmount(ing.amount, recipe.baseServings, servings);
                 return (
                   <div key={ing.id} style={s.ingredientRow}>
                     <span style={s.ingredientAmt}>{scaledAmt}</span>
