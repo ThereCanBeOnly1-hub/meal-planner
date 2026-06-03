@@ -34,7 +34,7 @@
 - **PlannerView**: week grid, header with week nav + weather, thaw banners, meal modal, extras panel
 - **ThawItemRow**: shared component for thaw reminder rows
 - **RecipesView**: router between RecipeGrid / RecipeDetail / RecipeEditor
-- **TagPicker**: reusable tag selector used in RecipeEditor, supports custom tags via props
+- **TagPicker**: reusable tag selector used in RecipeEditor, supports custom tags via props; "Manage" toggle reveals an ✕ on custom chips to delete them (built-in tags can't be deleted). Deleting calls `deleteCustomTag`, which removes the tag from the vocab AND strips it from every recipe using it (via `recipeToRow` bulk upsert), so no recipe is left referencing a removed tag.
 - **RecipeGrid**: recipe list with collapsed Meal/Diet/Cuisine filter dropdowns; header has Import + New buttons
 - **ImportModal**: "From link" / "From photo" recipe import; calls `/api/import-recipe`, normalizes result via `normalizeImported()`, then opens RecipeEditor pre-filled for review
 - **RecipeDetail**: hero photo, meta, ingredients (3-col), steps with dividers, notes at bottom

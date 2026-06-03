@@ -236,6 +236,17 @@ const normalizeImported = (data, photoOverride) => {
   };
 };
 
+// Maps an in-app recipe to its Supabase row shape.
+const recipeToRow = (r) => ({
+  id: r.id, name: r.name, description: r.description, url: r.url, photo: r.photo, notes: r.notes,
+  prep_time: r.prepTime, cook_time: r.cookTime, base_servings: r.baseServings,
+  meal_types: r.mealTypes, diet_tags: r.dietTags, cuisine_tags: r.cuisineTags,
+  ingredients: r.ingredients, steps: r.steps, updated_at: new Date().toISOString(),
+});
+
+// Custom-tag category key -> recipe field holding that tag list.
+const TAG_TYPE_FIELD = { mealtypes: "mealTypes", diets: "dietTags", cuisines: "cuisineTags" };
+
 // ─── Supabase Config ─────────────────────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY ?? "";
@@ -411,6 +422,36 @@ export default function App() {
     });
   };
 
+  // Delete a custom tag from the vocab AND strip it from any recipes using it,
+  // so no recipe is left referencing a tag that no longer exists.
+  const deleteCustomTag = (type, tag) => {
+    setCustomTags(prev => {
+      const next = { ...prev, [type]: (prev[type] || []).filter(t => t !== tag) };
+      if (isConfigured) saveCustomTagsToDB(next);
+      else saveCustomTags(type, next[type]);
+      return next;
+    });
+    const field = TAG_TYPE_FIELD[type];
+    if (!field) return;
+    setRecipes(prev => {
+      const changed = [];
+      const updated = prev.map(r => {
+        if ((r[field] || []).includes(tag)) {
+          const nr = { ...r, [field]: r[field].filter(x => x !== tag) };
+          changed.push(nr);
+          return nr;
+        }
+        return r;
+      });
+      if (isConfigured && changed.length) {
+        sb.upsert("recipes", changed.map(recipeToRow))
+          .then(() => setSyncStatus("synced"))
+          .catch(err => { console.error("Tag cleanup save:", err); setSyncStatus("error"); });
+      }
+      return updated;
+    });
+  };
+
   const loadAll = async () => {
     if (isLoadingRef.current) return;
     try {
@@ -504,15 +545,7 @@ export default function App() {
     navigate("recipes", { recipe });
     if (isConfigured) {
       try {
-        await sb.upsert("recipes", [{
-          id: recipe.id, name: recipe.name, description: recipe.description,
-          url: recipe.url, photo: recipe.photo, notes: recipe.notes,
-          prep_time: recipe.prepTime, cook_time: recipe.cookTime,
-          base_servings: recipe.baseServings, meal_types: recipe.mealTypes,
-          diet_tags: recipe.dietTags, cuisine_tags: recipe.cuisineTags,
-          ingredients: recipe.ingredients, steps: recipe.steps,
-          updated_at: new Date().toISOString(),
-        }]);
+        await sb.upsert("recipes", [recipeToRow(recipe)]);
         setSyncStatus("synced");
       } catch (err) { console.error("Save recipe:", err); setSyncStatus("error"); }
     }
@@ -556,7 +589,7 @@ export default function App() {
         {tab === "recipes" && (
           <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
             onSave={saveRecipe} onDelete={deleteRecipe}
-            customTags={customTags} onAddCustomTag={addCustomTag} />
+            customTags={customTags} onAddCustomTag={addCustomTag} onDeleteCustomTag={deleteCustomTag} />
         )}
       </div>
       <nav style={s.bottomNav}>
@@ -1080,32 +1113,50 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 }
 
 // ─── Recipes View ─────────────────────────────────────────────────────────────
-function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag }) {
-  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
+function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag }) {
+  if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(view.recipe?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} onDeleteCustomTag={onDeleteCustomTag} />;
   if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} />;
   return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
 
 // ─── Tag Picker ───────────────────────────────────────────────────────────────
-function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, selected, onToggle, chipStyle, chipActiveStyle }) {
+function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, onDeleteCustomTag, selected, onToggle, chipStyle, chipActiveStyle }) {
   const [adding, setAdding] = useState(false);
+  const [managing, setManaging] = useState(false);
   const [input, setInput] = useState("");
-  const allTags = [...defaultTags, ...(customTagsList||[]).filter(t => !defaultTags.includes(t))];
+  const customList = (customTagsList||[]).filter(t => !defaultTags.includes(t));
+  const allTags = [...defaultTags, ...customList];
   const addCustom = () => {
     const v = input.trim(); if (!v) return;
     onAddCustomTag(v);
     if (!selected.includes(v)) onToggle(v);
     setInput(""); setAdding(false);
   };
+  const deleteTag = (t) => {
+    if (!window.confirm(`Remove the "${t}" tag?\n\nIt will be deleted from this and any other recipes using it.`)) return;
+    if (selected.includes(t)) onToggle(t);   // drop it from the recipe being edited too
+    onDeleteCustomTag(t);
+  };
+  const canManage = onDeleteCustomTag && customList.length > 0;
   return (
     <div style={s.editorField}>
-      <label style={s.editorLabel}>{label}</label>
-      <div style={s.tagPicker}>
-        {allTags.map(t => (
-          <button key={t} style={{...s.tagPickerChip,...(selected.includes(t)?chipActiveStyle:{})}} className="tag-chip" onClick={()=>onToggle(t)}>{t}</button>
-        ))}
-        {!adding && <button style={s.addCustomChip} onClick={()=>setAdding(true)}>+ Custom</button>}
+      <div style={s.tagPickerHead}>
+        <label style={{...s.editorLabel,marginBottom:0}}>{label}</label>
+        {(canManage || managing) && (
+          <button style={{...s.tagManageBtn,...(managing?s.tagManageBtnOn:{})}} onClick={()=>setManaging(m=>!m)}>{managing?"Done":"Manage"}</button>
+        )}
       </div>
+      <div style={s.tagPicker}>
+        {allTags.map(t => {
+          const isCustom = customList.includes(t);
+          if (managing && isCustom) {
+            return <button key={t} style={{...s.tagPickerChip,...s.tagDeleteChip}} className="tag-delete-chip" onClick={()=>deleteTag(t)}>{t} ✕</button>;
+          }
+          return <button key={t} disabled={managing} style={{...s.tagPickerChip,...(selected.includes(t)?chipActiveStyle:{}),...(managing?s.tagChipDim:{})}} className="tag-chip" onClick={()=>!managing&&onToggle(t)}>{t}</button>;
+        })}
+        {!adding && !managing && <button style={s.addCustomChip} onClick={()=>setAdding(true)}>+ Custom</button>}
+      </div>
+      {managing && <div style={s.tagManageHint}>Tap a custom tag to remove it everywhere. Built-in tags can't be deleted.</div>}
       {adding && (
         <div style={s.customTagRow}>
           <input style={{...s.editorInput,flex:1}} autoFocus placeholder="New tag…" value={input}
@@ -1489,7 +1540,7 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
 }
 
 // ─── Recipe Editor ────────────────────────────────────────────────────────────
-function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onAddCustomTag }) {
+function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onAddCustomTag, onDeleteCustomTag }) {
   const [r, setR] = useState(initialRecipe);
   const set = (key, val) => setR(prev => ({...prev, [key]: val}));
 
@@ -1578,17 +1629,17 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
 
         {/* Meal Types */}
         <TagPicker label="Meal Type" defaultTags={MEAL_TYPE_TAGS}
-          customTagsList={customTags?.mealtypes} onAddCustomTag={t=>onAddCustomTag("mealtypes",t)}
+          customTagsList={customTags?.mealtypes} onAddCustomTag={t=>onAddCustomTag("mealtypes",t)} onDeleteCustomTag={t=>onDeleteCustomTag("mealtypes",t)}
           selected={r.mealTypes} onToggle={toggleMealType} chipActiveStyle={s.tagPickerChipOn} />
 
         {/* Diet Tags */}
         <TagPicker label="Dietary Tags" defaultTags={DIET_TAGS}
-          customTagsList={customTags?.diets} onAddCustomTag={t=>onAddCustomTag("diets",t)}
+          customTagsList={customTags?.diets} onAddCustomTag={t=>onAddCustomTag("diets",t)} onDeleteCustomTag={t=>onDeleteCustomTag("diets",t)}
           selected={r.dietTags} onToggle={toggleDietTag} chipActiveStyle={s.tagPickerDietOn} />
 
         {/* Cuisine Tags */}
         <TagPicker label="Cuisine" defaultTags={CUISINE_TAGS}
-          customTagsList={customTags?.cuisines} onAddCustomTag={t=>onAddCustomTag("cuisines",t)}
+          customTagsList={customTags?.cuisines} onAddCustomTag={t=>onAddCustomTag("cuisines",t)} onDeleteCustomTag={t=>onDeleteCustomTag("cuisines",t)}
           selected={r.cuisineTags||[]} onToggle={toggleCuisineTag} chipActiveStyle={s.tagPickerCuisineOn} />
 
         {/* Ingredients */}
@@ -1939,6 +1990,12 @@ const s = {
   editorInput: { width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:9, padding:"11px 13px", fontSize:15, color:"#f0e8d8", fontFamily:"'Lora',Georgia,serif", outline:"none", boxSizing:"border-box" },
   editorTextarea: { width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:9, padding:"11px 13px", fontSize:14, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box", resize:"vertical" },
 
+  tagPickerHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 },
+  tagManageBtn: { background:"none", border:"none", color:"#7a6448", fontSize:12, fontWeight:600, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", padding:"2px 4px" },
+  tagManageBtnOn: { color:"#f4c97a" },
+  tagManageHint: { fontSize:11, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", marginTop:7 },
+  tagDeleteChip: { background:"#3a1f1a", border:"1.5px solid #6a3328", color:"#f0a890" },
+  tagChipDim: { opacity:0.4 },
   tagPicker: { display:"flex", flexWrap:"wrap", gap:6 },
   tagPickerChip: { background:"#241e16", border:"1.5px solid #3a2e22", borderRadius:20, padding:"7px 14px", fontSize:13, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
   tagPickerChipOn: { background:"#2e2c18", border:"1.5px solid #c8b840", color:"#f4e060" },
@@ -1984,6 +2041,8 @@ const css = `
   button.type-chip:focus { outline: none; }
   button.type-chip:focus-visible { outline: none; }
   .tag-chip:hover { opacity: 0.8; }
+  .tag-chip:disabled { cursor: default; }
+  .tag-delete-chip:hover { background: #4a261f !important; border-color: #8a4030 !important; }
   .new-recipe-btn:hover { opacity: 0.9; }
   .import-recipe-btn:hover { border-color: #c8a878 !important; background: #3a2e22 !important; }
   @keyframes importPulse { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.18);opacity:0.7} }
