@@ -1707,9 +1707,9 @@ const s = {
 
   ingredientList: { display:"flex", flexDirection:"column", gap:8 },
   ingredientRow: { display:"flex", alignItems:"center", gap:0, padding:"8px 0", borderBottom:"1px solid #2a2018" },
-  ingredientAmt: { fontSize:13, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", minWidth:44, textAlign:"right" as const, paddingRight:6 },
-  ingredientUnit: { fontSize:13, color:"#a08060", fontFamily:"'DM Sans',sans-serif", minWidth:48, paddingRight:8 },
-  ingredientName: { fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", flex:1 },
+  ingredientAmt: { fontSize:13, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", width:44, flexShrink:0, textAlign:"right" as const, paddingRight:8 },
+  ingredientUnit: { fontSize:13, color:"#a08060", fontFamily:"'DM Sans',sans-serif", width:72, flexShrink:0 },
+  ingredientName: { fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", flex:1, textAlign:"left" as const },
 
   stepList: { display:"flex", flexDirection:"column" },
   stepRow: { display:"flex", gap:12, alignItems:"flex-start", padding:"12px 0", textAlign:"left" as const },
