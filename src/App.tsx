@@ -1224,7 +1224,7 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
         )}
 
         {/* URL */}
-        {recipe.url && <a href={recipe.url} target="_blank" rel="noopener noreferrer" style={s.detailUrl}>🔗 View original recipe</a>}
+        {recipe.url && <a href={/^https?:\/\//i.test(recipe.url) ? recipe.url : `https://${recipe.url}`} target="_blank" rel="noopener noreferrer" style={s.detailUrl}>🔗 View original recipe</a>}
 
         {/* Notes */}
         {recipe.notes && (
