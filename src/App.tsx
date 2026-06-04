@@ -264,29 +264,56 @@ const parseJsonArr = (raw) => { if (!raw) return []; try { const v = typeof raw 
 
 // Normalized key for matching the same grocery ingredient (drops prep notes after a comma).
 const groceryKey = (name) => String(name || "").trim().toLowerCase().split(",")[0].replace(/\s+/g, " ").trim();
+// Canonical abbreviation for common units (full names, plurals, and variants all
+// map to one short form) so "1 pound" + "1 lbs" merge and display compactly.
+const UNIT_CANON = {
+  teaspoon:"tsp", tsp:"tsp",
+  tablespoon:"tbsp", tablespoonful:"tbsp", tbsp:"tbsp", tbs:"tbsp", tbl:"tbsp",
+  cup:"cup", c:"cup",
+  ounce:"oz", oz:"oz",
+  "fluid ounce":"fl oz", "fl oz":"fl oz", floz:"fl oz",
+  pound:"lb", lb:"lb",
+  gram:"g", gramme:"g", g:"g",
+  kilogram:"kg", kilo:"kg", kg:"kg",
+  milliliter:"ml", millilitre:"ml", ml:"ml",
+  liter:"L", litre:"L", l:"L",
+  pint:"pt", pt:"pt",
+  quart:"qt", qt:"qt",
+  gallon:"gal", gal:"gal",
+  package:"pkg", pkg:"pkg", pack:"pkg",
+  // irregular plurals (can't just strip a trailing "s")
+  pinch:"pinch", pinches:"pinch",
+  dash:"dash", dashes:"dash",
+  bunch:"bunch", bunches:"bunch",
+  box:"box", boxes:"box",
+};
+const _unitNorm = (u) => String(u || "").trim().toLowerCase().replace(/\s+/g, " ").replace(/\.$/, "");
+// Key used to decide whether two units are the same (for merging).
+const unitKey = (u) => { const k = _unitNorm(u); return UNIT_CANON[k] || UNIT_CANON[k.replace(/s$/, "")] || k.replace(/s$/, ""); };
+// What to show: a known unit's abbreviation, else the unit as typed.
+const unitDisplay = (u) => { const k = _unitNorm(u); return UNIT_CANON[k] || UNIT_CANON[k.replace(/s$/, "")] || String(u || "").trim(); };
+
 // Turn a recipe ingredient amount/unit into a measure: numeric {amount,unit} when parseable, else {text}.
 const ingredientToMeasure = (amount, unit) => {
-  const a = String(amount || "").trim(), u = String(unit || "").trim();
+  const a = String(amount || "").trim(), u = unitDisplay(unit);
   if (!a && !u) return null;
   const n = parseQty(a);
   if (n !== null) return { amount: n, unit: u };
   return { text: [a, u].filter(Boolean).join(" ") };
 };
-// Normalize a unit for comparison (so "cup"/"cups", "lb"/"lbs" merge).
-const normUnit = (u) => String(u || "").trim().toLowerCase().replace(/s$/, "");
 // Merge incoming measures into existing: sum numerics with matching units, else append.
 const mergeMeasures = (existing, incoming) => {
   const out = (existing || []).map(m => ({ ...m }));
   (incoming || []).forEach(im => {
     if (im.amount != null) {
-      const match = out.find(m => m.amount != null && normUnit(m.unit) === normUnit(im.unit));
+      const match = out.find(m => m.amount != null && unitKey(m.unit) === unitKey(im.unit));
       if (match) { match.amount += im.amount; return; }
     }
     out.push({ ...im });
   });
   return out;
 };
-const formatMeasures = (measures) => (measures || []).map(m => m.amount != null ? `${formatQty(m.amount)}${m.unit ? ` ${m.unit}` : ""}` : m.text).filter(Boolean).join(" + ");
+const formatMeasures = (measures) => (measures || []).map(m => m.amount != null ? `${formatQty(m.amount)}${m.unit ? ` ${unitDisplay(m.unit)}` : ""}` : m.text).filter(Boolean).join(" + ");
 
 // ─── Auto-Fill engine ─────────────────────────────────────────────────────────
 const AF_WEEKDAYS = DAYS.slice(0, 5); // Mon–Fri
