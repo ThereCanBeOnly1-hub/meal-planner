@@ -67,10 +67,10 @@
 
 ## Shopping Mode / aisle categorization
 
-- `STORE_LAYOUT` (module const in App.tsx) = ordered store sections (Mariano's, pre-seeded) with `{id,label,hints}`; order is the walk path. Doubles as category set, Claude prompt hints, and sort order. `"other"` ("Not sorted") is last.
+- Store layout = ordered sections `{id,label,hints,aisle}` (`aisle` number marks numbered aisles vs wall sections). `DEFAULT_STORE_LAYOUT` seeds Mariano's (walk-path order); editable via `LayoutEditor` (rename label/description, reorder up/down — ids stay stable so the cache survives) and persisted in `app_settings` key `store_layout` → `storeLayout` state. Doubles as category set, Claude prompt hints, and sort order. `"other"` ("Not sorted") is the catch-all. The move-to picker uses `layoutPickerOrder` (wall sections first, then aisles, then other) showing label + description.
 - `normIngredient` builds a cache key from an item name (strips quantities/units/filler words, drops text after a comma) — note it deliberately keeps frozen/canned/dried since those change the aisle.
 - `ingredientCats` cache (normName → sectionId) persists in `app_settings` key `ingredient_categories`, shared across devices.
-- `api/categorize.ts` (Vercel, reuses `ANTHROPIC_API_KEY`): batched Claude call, takes uncached names + STORE_LAYOUT, returns name→sectionId (enum-constrained). Called by `categorizeGroceryItems` only for cache misses, on entering Shopping Mode. Low-balance error surfaces in the Shopping Mode banner.
+- `api/categorize.ts` (Vercel, reuses `ANTHROPIC_API_KEY`): batched Claude call, takes uncached names + current `storeLayout` sections, returns name→sectionId (enum-constrained). Called by `categorizeGroceryItems` only for cache misses, on entering Shopping Mode. Low-balance error surfaces in the Shopping Mode banner.
 - `setItemAisle` overrides + remembers an ingredient's aisle in the cache.
 
 ## Deployment

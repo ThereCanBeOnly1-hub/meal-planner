@@ -247,35 +247,44 @@ const recipeToRow = (r) => ({
 const TAG_TYPE_FIELD = { mealtypes: "mealTypes", diets: "dietTags", cuisines: "cuisineTags" };
 
 // ─── Lists ────────────────────────────────────────────────────────────────────
-// Store layout (Mariano's), ordered to match the walk path: Produce → Meat →
-// Aisles 17→2 → Dairy → Alcohol → Deli → Bakery. Doubles as the category set,
-// the Claude prompt hints, and the Shopping Mode sort order. "other" is last.
-const STORE_LAYOUT = [
-  { id: "produce", label: "Produce", hints: "fresh fruits and vegetables" },
-  { id: "meat", label: "Meat", hints: "fresh meat, poultry, seafood" },
-  { id: "aisle17", label: "Aisle 17", hints: "condiments, rice, peanut butter" },
-  { id: "aisle16", label: "Aisle 16", hints: "pasta, Mexican food, asian food, Italian food" },
-  { id: "aisle15", label: "Aisle 15", hints: "canned vegetables, canned fruit, soup, applesauce" },
-  { id: "aisle14", label: "Aisle 14", hints: "spices, sugar, vinegar, baking, flour" },
-  { id: "aisle13", label: "Aisle 13", hints: "cereal, pancake mix, syrup, oatmeal, granola bars" },
-  { id: "aisle12", label: "Aisle 12", hints: "coffee, tea, dried fruit, candy" },
-  { id: "aisle11", label: "Aisle 11", hints: "snack nuts, chips, popcorn, pretzels, salsas, dips" },
-  { id: "aisle10", label: "Aisle 10", hints: "cookies, bottled water, crackers, juice" },
-  { id: "aisle9", label: "Aisle 9", hints: "soda, energy drinks, natural beverages, bottled tea" },
-  { id: "aisle8", label: "Aisle 8", hints: "pet care, pet food, household cleaners, dish cleaning" },
-  { id: "aisle7", label: "Aisle 7", hints: "foil, plastic wrap, laundry supplies, office supplies" },
-  { id: "aisle6", label: "Aisle 6", hints: "frozen pizza, frozen snacks, frozen meals" },
-  { id: "aisle5", label: "Aisle 5", hints: "ice cream, frozen vegetables, frozen bread, frozen potatoes, frozen breakfast, frozen juices" },
-  { id: "aisle4", label: "Aisle 4", hints: "cosmetics, shaving, shampoo, deodorant, skin care" },
-  { id: "aisle3", label: "Aisle 3", hints: "toothpaste, vitamins, feminine care, first aid" },
-  { id: "aisle2", label: "Aisle 2", hints: "pain medicine, cold and flu medicine" },
-  { id: "dairy", label: "Dairy", hints: "milk, cheese, eggs, yogurt, butter, cream" },
-  { id: "alcohol", label: "Alcohol", hints: "beer, wine, liquor" },
-  { id: "deli", label: "Deli", hints: "deli meats, prepared foods, fresh-sliced cheese" },
-  { id: "bakery", label: "Bakery", hints: "fresh bread, pastries, cakes, bagels" },
-  { id: "other", label: "Not sorted", hints: "anything that doesn't clearly fit a section above" },
+// Default store layout (Mariano's), ordered to match the walk path: Produce →
+// Meat → Aisles 17→2 → Dairy → Alcohol → Deli → Bakery. Doubles as the category
+// set, the Claude prompt hints, and the Shopping Mode sort order. Editable and
+// persisted in app_settings; "other" is the catch-all. `aisle` distinguishes
+// numbered aisles from wall sections (for the move-picker grouping).
+const DEFAULT_STORE_LAYOUT = [
+  { id: "produce", label: "Produce", hints: "fresh fruits and vegetables", aisle: null },
+  { id: "meat", label: "Meat", hints: "fresh meat, poultry, seafood", aisle: null },
+  { id: "aisle17", label: "Aisle 17", hints: "condiments, rice, peanut butter", aisle: 17 },
+  { id: "aisle16", label: "Aisle 16", hints: "pasta, Mexican food, asian food, Italian food", aisle: 16 },
+  { id: "aisle15", label: "Aisle 15", hints: "canned vegetables, canned fruit, soup, applesauce", aisle: 15 },
+  { id: "aisle14", label: "Aisle 14", hints: "spices, sugar, vinegar, baking, flour", aisle: 14 },
+  { id: "aisle13", label: "Aisle 13", hints: "cereal, pancake mix, syrup, oatmeal, granola bars", aisle: 13 },
+  { id: "aisle12", label: "Aisle 12", hints: "coffee, tea, dried fruit, candy", aisle: 12 },
+  { id: "aisle11", label: "Aisle 11", hints: "snack nuts, chips, popcorn, pretzels, salsas, dips", aisle: 11 },
+  { id: "aisle10", label: "Aisle 10", hints: "cookies, bottled water, crackers, juice", aisle: 10 },
+  { id: "aisle9", label: "Aisle 9", hints: "soda, energy drinks, natural beverages, bottled tea", aisle: 9 },
+  { id: "aisle8", label: "Aisle 8", hints: "pet care, pet food, household cleaners, dish cleaning", aisle: 8 },
+  { id: "aisle7", label: "Aisle 7", hints: "foil, plastic wrap, laundry supplies, office supplies", aisle: 7 },
+  { id: "aisle6", label: "Aisle 6", hints: "frozen pizza, frozen snacks, frozen meals", aisle: 6 },
+  { id: "aisle5", label: "Aisle 5", hints: "ice cream, frozen vegetables, frozen bread, frozen potatoes, frozen breakfast, frozen juices", aisle: 5 },
+  { id: "aisle4", label: "Aisle 4", hints: "cosmetics, shaving, shampoo, deodorant, skin care", aisle: 4 },
+  { id: "aisle3", label: "Aisle 3", hints: "toothpaste, vitamins, feminine care, first aid", aisle: 3 },
+  { id: "aisle2", label: "Aisle 2", hints: "pain medicine, cold and flu medicine", aisle: 2 },
+  { id: "dairy", label: "Dairy", hints: "milk, cheese, eggs, yogurt, butter, cream", aisle: null },
+  { id: "alcohol", label: "Alcohol", hints: "beer, wine, liquor", aisle: null },
+  { id: "deli", label: "Deli", hints: "deli meats, prepared foods, fresh-sliced cheese", aisle: null },
+  { id: "bakery", label: "Bakery", hints: "fresh bread, pastries, cakes, bagels", aisle: null },
+  { id: "other", label: "Not sorted", hints: "anything that doesn't clearly fit a section above", aisle: null },
 ];
-const STORE_SECTION = Object.fromEntries(STORE_LAYOUT.map((s, i) => [s.id, { ...s, order: i }]));
+// Order for the move-to picker: wall sections first, then aisles (in layout
+// order, i.e. 17→2), then the "other" catch-all last.
+const layoutPickerOrder = (layout) => {
+  const wall = layout.filter(s => s.aisle == null && s.id !== "other");
+  const aisles = layout.filter(s => s.aisle != null);
+  const other = layout.filter(s => s.id === "other");
+  return [...wall, ...aisles, ...other];
+};
 // Words safe to strip when building a category cache key (don't change the aisle).
 // NOTE: never strip frozen/canned/dried — those determine the aisle.
 const NORM_FILLERS = ["organic", "fresh", "ripe", "large", "small", "medium", "lean", "boneless", "skinless", "raw", "extra", "premium", "fine", "whole", "natural", "unsalted", "salted"];
@@ -492,6 +501,7 @@ export default function App() {
   const [groceryOpen, setGroceryOpen] = useState(false);
   const groceryPopRef = useRef(false);
   const [ingredientCats, setIngredientCats] = useState({});
+  const [storeLayout, setStoreLayout] = useState(DEFAULT_STORE_LAYOUT);
   const [shoppingOpen, setShoppingOpen] = useState(false);
   const [catStatus, setCatStatus] = useState(""); // "", "loading", or an error message
   const shoppingPopRef = useRef(false);
@@ -686,7 +696,7 @@ export default function App() {
         sb.get("lists", "?order=created_at.asc").catch(() => []),
         sb.get("list_items", "?order=created_at.asc").catch(() => []),
       ]);
-      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories)").catch(() => []);
+      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories,store_layout)").catch(() => []);
 
       const parseWeekRows = (rows) => {
         const w = initialWeek();
@@ -736,6 +746,8 @@ export default function App() {
       if (customTagsRow && customTagsRow.value) setCustomTags(prev => ({ ...prev, ...customTagsRow.value }));
       const catsRow = settingsRows.find(r => r.key === "ingredient_categories");
       if (catsRow && catsRow.value) setIngredientCats(catsRow.value);
+      const layoutRow = settingsRows.find(r => r.key === "store_layout");
+      if (layoutRow && Array.isArray(layoutRow.value) && layoutRow.value.length) setStoreLayout(layoutRow.value);
 
       hasLoadedRef.current = true;
       setSyncStatus("synced");
@@ -921,7 +933,7 @@ export default function App() {
     try {
       const resp = await fetch("/api/categorize", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ names: [...misses], sections: STORE_LAYOUT }),
+        body: JSON.stringify({ names: [...misses], sections: storeLayout }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) { setCatStatus(data.message || "Couldn't sort items into aisles."); return; }
@@ -942,6 +954,7 @@ export default function App() {
 
   const openShopping = () => { setShoppingOpen(true); setCatStatus(""); history.pushState({ overlay: "shopping" }, ""); categorizeGroceryItems(); };
   const closeShopping = () => { setShoppingOpen(false); if (!shoppingPopRef.current) history.back(); };
+  const saveStoreLayout = (next) => { setStoreLayout(next); if (isConfigured) sb.upsert("app_settings", [{ key: "store_layout", value: next }], "key").catch(e => console.error("Store layout save:", e)); };
 
   return (
     <div style={s.appRoot}>
@@ -1017,9 +1030,9 @@ export default function App() {
       )}
 
       {shoppingOpen && (
-        <ShoppingMode list={lists.find(l => l.type === "grocery")} cats={ingredientCats} catStatus={catStatus}
+        <ShoppingMode list={lists.find(l => l.type === "grocery")} cats={ingredientCats} catStatus={catStatus} layout={storeLayout}
           onToggle={toggleListItem} onSetAisle={setItemAisle} onAddItem={addListItem}
-          onRecategorize={categorizeGroceryItems} onClose={closeShopping} />
+          onRecategorize={categorizeGroceryItems} onSaveLayout={saveStoreLayout} onClose={closeShopping} />
       )}
     </div>
   );
@@ -1075,14 +1088,16 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
 }
 
 // ─── Shopping Mode ────────────────────────────────────────────────────────────
-function ShoppingMode({ list, cats, catStatus, onToggle, onSetAisle, onAddItem, onRecategorize, onClose }) {
+function ShoppingMode({ list, cats, catStatus, layout, onToggle, onSetAisle, onAddItem, onRecategorize, onSaveLayout, onClose }) {
   const [checkOrder, setCheckOrder] = useState([]);
   const [pickerItem, setPickerItem] = useState(null);
   const [addInput, setAddInput] = useState("");
+  const [editLayout, setEditLayout] = useState(false);
   const items = list?.items || [];
   const total = items.length;
   const doneCount = items.filter(i => i.checked).length;
-  const catFor = (it) => cats[normIngredient(it.text)] || "other";
+  const knownIds = new Set(layout.map(s => s.id));
+  const catFor = (it) => { const c = cats[normIngredient(it.text)]; return c && knownIds.has(c) ? c : "other"; };
 
   const toggle = (it) => {
     const willCheck = !it.checked;
@@ -1094,7 +1109,7 @@ function ShoppingMode({ list, cats, catStatus, onToggle, onSetAisle, onAddItem, 
   const unchecked = items.filter(i => !i.checked);
   const bySection = {};
   unchecked.forEach(it => { const sec = catFor(it); (bySection[sec] ||= []).push(it); });
-  const orderedSections = STORE_LAYOUT.filter(sec => bySection[sec.id]?.length);
+  const orderedSections = layout.filter(sec => bySection[sec.id]?.length);
   const checkedItems = items.filter(i => i.checked)
     .sort((a, b) => { const ia = checkOrder.indexOf(a.id), ib = checkOrder.indexOf(b.id); return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib); });
 
@@ -1114,7 +1129,10 @@ function ShoppingMode({ list, cats, catStatus, onToggle, onSetAisle, onAddItem, 
       <div style={s.shopTopBar}>
         <button style={s.detailBackBtn} className="back-btn" onClick={onClose}>← Done</button>
         <div style={s.shopTitle}>Shopping</div>
-        <div style={s.shopProgress}>{doneCount}/{total}</div>
+        <div style={s.shopTopRight}>
+          <button style={s.shopGearBtn} className="shop-aisle-btn" onClick={() => setEditLayout(true)} title="Edit aisles">⚙</button>
+          <div style={s.shopProgress}>{doneCount}/{total}</div>
+        </div>
       </div>
       <div style={s.shopProgressTrack}><div style={{...s.shopProgressFill, width: total ? `${(doneCount / total) * 100}%` : "0%"}} /></div>
 
@@ -1159,14 +1177,59 @@ function ShoppingMode({ list, cats, catStatus, onToggle, onSetAisle, onAddItem, 
           <div style={s.shopPicker} onClick={e => e.stopPropagation()} className="modal-in">
             <div style={s.shopPickerTitle}>Move “{abbrev(pickerItem.text, 28)}” to…</div>
             <div style={s.shopPickerList}>
-              {STORE_LAYOUT.map(sec => (
+              {layoutPickerOrder(layout).map(sec => (
                 <button key={sec.id} style={{...s.shopPickerItem,...(catFor(pickerItem)===sec.id?s.shopPickerItemOn:{})}}
-                  onClick={() => { onSetAisle(pickerItem, sec.id); setPickerItem(null); }}>{sec.label}</button>
+                  onClick={() => { onSetAisle(pickerItem, sec.id); setPickerItem(null); }}>
+                  <span style={s.shopPickerName}>{sec.label}</span>
+                  {sec.hints && <span style={s.shopPickerHint}>{sec.hints}</span>}
+                </button>
               ))}
             </div>
           </div>
         </div>
       )}
+
+      {editLayout && <LayoutEditor layout={layout} onSave={(next) => { onSaveLayout(next); setEditLayout(false); }} onClose={() => setEditLayout(false)} />}
+    </div>
+  );
+}
+
+// ─── Store layout editor ──────────────────────────────────────────────────────
+function LayoutEditor({ layout, onSave, onClose }) {
+  const [draft, setDraft] = useState(() => layout.map(s => ({ ...s })));
+  const update = (i, key, val) => setDraft(d => d.map((s, idx) => idx === i ? { ...s, [key]: val } : s));
+  const move = (i, dir) => setDraft(d => {
+    const j = i + dir;
+    if (j < 0 || j >= d.length) return d;
+    const n = [...d]; [n[i], n[j]] = [n[j], n[i]]; return n;
+  });
+  return (
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.layoutEditor} onClick={e => e.stopPropagation()} className="modal-in">
+        <div style={s.modalHead}>
+          <div><div style={s.modalEyebrow}>⚙ Store layout</div><div style={s.modalTitle}>Edit aisles</div></div>
+          <button style={s.modalClose} onClick={onClose}>✕</button>
+        </div>
+        <div style={s.layoutHint}>Rename sections, edit what's in each (helps sorting), and reorder to match your walk path.</div>
+        <div style={s.layoutList}>
+          {draft.map((sec, i) => (
+            <div key={sec.id} style={s.layoutRow}>
+              <div style={s.layoutMoveCol}>
+                <button style={{...s.layoutMoveBtn,...(i===0?s.layoutMoveDim:{})}} className="layout-move" onClick={() => move(i, -1)}>▲</button>
+                <button style={{...s.layoutMoveBtn,...(i===draft.length-1?s.layoutMoveDim:{})}} className="layout-move" onClick={() => move(i, 1)}>▼</button>
+              </div>
+              <div style={{flex:1, minWidth:0}}>
+                <input style={{...s.editorInput,fontSize:14,fontWeight:700,marginBottom:5}} value={sec.label} onChange={e => update(i, "label", e.target.value)} placeholder="Section name" />
+                <input style={{...s.editorInput,fontSize:12.5}} value={sec.hints} onChange={e => update(i, "hints", e.target.value)} placeholder="What's here (e.g. spices, sugar, flour)" />
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={s.layoutFoot}>
+          <button style={s.btnClear} onClick={onClose}>Cancel</button>
+          <button style={s.btnSave} onClick={() => onSave(draft)}>Save layout</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3126,11 +3189,24 @@ const s = {
   shopQty: { color:"#f4c97a", fontWeight:700 },
   shopAisleBtn: { background:"none", border:"none", fontSize:15, cursor:"pointer", padding:"6px", flexShrink:0, opacity:0.5 },
   shopAddBar: { display:"flex", gap:8, alignItems:"center", padding:"10px 14px", background:"#1c1712", borderTop:"1px solid #2a2018" },
-  shopPicker: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:16, padding:"16px", width:"100%", maxWidth:360, maxHeight:"75vh", display:"flex", flexDirection:"column" },
+  shopTopRight: { display:"flex", alignItems:"center", gap:10 },
+  shopGearBtn: { background:"none", border:"none", fontSize:18, cursor:"pointer", color:"#9a7f60", padding:"2px 4px", lineHeight:1 },
+  shopPicker: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:16, padding:"16px", width:"100%", maxWidth:380, maxHeight:"78vh", display:"flex", flexDirection:"column" },
   shopPickerTitle: { fontSize:15, fontWeight:700, color:"#f4e4c4", fontFamily:"'DM Sans',sans-serif", marginBottom:12 },
   shopPickerList: { display:"flex", flexDirection:"column", gap:4, overflowY:"auto" },
-  shopPickerItem: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:9, padding:"11px 13px", fontSize:14, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left" },
-  shopPickerItemOn: { background:"#2e2418", borderColor:"#c8a878", color:"#f4c97a", fontWeight:700 },
+  shopPickerItem: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:9, padding:"10px 13px", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left", display:"flex", flexDirection:"column", gap:2 },
+  shopPickerItemOn: { background:"#2e2418", borderColor:"#c8a878" },
+  shopPickerName: { fontSize:14, fontWeight:700, color:"#f4e4c4", fontFamily:"'DM Sans',sans-serif" },
+  shopPickerHint: { fontSize:11.5, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+
+  layoutEditor: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:16, padding:"18px", width:"100%", maxWidth:440, maxHeight:"88vh", display:"flex", flexDirection:"column" },
+  layoutHint: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginBottom:12, lineHeight:1.45 },
+  layoutList: { display:"flex", flexDirection:"column", gap:8, overflowY:"auto", flex:1 },
+  layoutRow: { display:"flex", gap:9, alignItems:"flex-start", background:"#1c1712", border:"1px solid #2a2018", borderRadius:10, padding:"9px" },
+  layoutMoveCol: { display:"flex", flexDirection:"column", gap:3, flexShrink:0 },
+  layoutMoveBtn: { background:"#2e2418", border:"1px solid #3a2e22", borderRadius:6, width:30, height:26, fontSize:11, color:"#c8a878", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
+  layoutMoveDim: { opacity:0.3 },
+  layoutFoot: { display:"flex", justifyContent:"flex-end", gap:10, paddingTop:14, marginTop:6, borderTop:"1px solid #3a2e22" },
 };
 
 const chips = {
@@ -3159,6 +3235,7 @@ const css = `
   .shop-aisle-btn:hover { opacity: 1 !important; }
   .shop-retry:hover { background: #4a2e1c !important; }
   .shop-picker-item:hover { border-color: #c8a878 !important; }
+  .layout-move:hover { background: #3a2e22 !important; color: #f4c97a !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
   .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }
