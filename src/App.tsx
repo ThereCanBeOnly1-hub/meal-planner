@@ -906,17 +906,13 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
   const items = list?.items || [];
-  const unchecked = items.filter(i => !i.checked);
   const checked = items.filter(i => i.checked);
-  const dupKeys = computeDupKeys(items);
   const submit = () => { const t = input.trim(); if (!t || !list) return; onAddItem(list.id, t); setInput(""); };
   const addWeek = () => {
     const { added, merged } = onAddWeek();
     setMsg(added + merged === 0 ? "Nothing to add from this week" : `✓ Added ${added}${merged ? `, merged ${merged}` : ""}`);
     setTimeout(() => setMsg(""), 2600);
   };
-
-  const row = (it) => <ListItemRow key={it.id} item={it} listId={list.id} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggleItem} onDelete={onDeleteItem} />;
 
   return (
     <div style={s.groceryOverlay} onClick={onClose}>
@@ -941,20 +937,12 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
           {items.length === 0 ? (
             <div style={s.listEmptyState}><div style={{fontSize:28,marginBottom:8}}>🛒</div><div style={s.listEmptyStateText}>Grocery list is empty. Add items above.</div></div>
           ) : (
-            <>
-              {unchecked.map(row)}
-              {checked.length > 0 && (
-                <>
-                  <div style={s.listCheckedDivider}>{checked.length} done</div>
-                  {checked.map(row)}
-                </>
-              )}
-            </>
+            <ListItemsList items={items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} />
           )}
         </div>
 
         <div style={s.groceryDrawerFoot}>
-          {checked.length > 0 && <button style={s.btnClear} onClick={() => onClearItems(list.id, true)}>Clear checked</button>}
+          {checked.length > 0 && <button style={s.btnClear} onClick={() => onClearItems(list.id, true)}>Delete checked</button>}
           <button style={{...s.btnClear,marginLeft:"auto"}} onClick={onOpenFull}>Open full list →</button>
         </div>
       </div>
@@ -2287,26 +2275,49 @@ const computeDupKeys = (items) => {
   return new Set([...manual].filter(k => recipe.has(k)));
 };
 
+const abbrev = (str, n) => (str && str.length > n ? str.slice(0, n - 1) + "…" : str || "");
+
 function ListItemRow({ item, listId, isDup, onToggle, onDelete }) {
+  const [showSrc, setShowSrc] = useState(false);
   const measures = formatMeasures(item.measures);
-  const src = item.sources && item.sources.length
-    ? (item.sources.length === 1 ? `from ${item.sources[0].name}` : `from ${item.sources.length} recipes`)
-    : null;
+  const sources = item.sources || [];
+  const hasSrc = sources.length > 0;
   return (
     <div style={s.listItemRow}>
       <button style={{...s.listCheck,...(item.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggle(listId, item.id)}>{item.checked ? "✓" : ""}</button>
       <div style={{flex:1, minWidth:0}}>
         <div style={{...s.listItemText,...(item.checked?s.listItemTextChecked:{})}}>
           {measures && <span style={s.listItemQty}>{measures} </span>}{item.text}
+          {isDup && <span style={s.listItemDup} title="Also on the list from another source">dup</span>}
         </div>
-        {(src || isDup) && (
-          <div style={s.listItemSubRow}>
-            {src && <span style={s.listItemSource}>🍽 {src}</span>}
-            {isDup && <span style={s.listItemDup} title="Also on the list from another source">dup</span>}
-          </div>
-        )}
+        {hasSrc && showSrc && <div style={s.listItemSrcNames}>{sources.map(s => abbrev(s.name, 24)).join(", ")}</div>}
       </div>
+      {hasSrc && <button style={s.listSrcIcon} className="list-src-icon" onClick={() => setShowSrc(v => !v)} title={sources.map(s => s.name).join(", ")}>🍽</button>}
       <button style={s.listItemDel} className="list-item-del" onClick={() => onDelete(listId, item.id)}>✕</button>
+    </div>
+  );
+}
+
+// Shared renderer: manual items pinned on top, a thin divider, then recipe-sourced
+// items, then checked items at the bottom.
+function ListItemsList({ items, listId, onToggle, onDelete }) {
+  const dupKeys = computeDupKeys(items);
+  const unchecked = items.filter(i => !i.checked);
+  const checked = items.filter(i => i.checked);
+  const manual = unchecked.filter(i => !(i.sources && i.sources.length));
+  const recipe = unchecked.filter(i => i.sources && i.sources.length);
+  const rowOf = (it) => <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggle} onDelete={onDelete} />;
+  return (
+    <div style={s.listItems}>
+      {manual.map(rowOf)}
+      {manual.length > 0 && recipe.length > 0 && <div style={s.listGroupDivider} />}
+      {recipe.map(rowOf)}
+      {checked.length > 0 && (
+        <>
+          <div style={s.listCheckedDivider}>{checked.length} done</div>
+          {checked.map(rowOf)}
+        </>
+      )}
     </div>
   );
 }
@@ -2396,15 +2407,11 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
   const [nameDraft, setNameDraft] = useState(list.name);
   const isGrocery = list.type === "grocery";
 
-  const unchecked = list.items.filter(i => !i.checked);
   const checked = list.items.filter(i => i.checked);
   const hasChecked = checked.length > 0;
 
   const submit = () => { const t = input.trim(); if (!t) return; onAddItem(list.id, t); setInput(""); };
   const saveName = () => { const n = nameDraft.trim(); if (n) onUpdateList(list.id, { name: n }); setRenaming(false); };
-
-  const dupKeys = computeDupKeys(list.items);
-  const itemRow = (it) => <ListItemRow key={it.id} item={it} listId={list.id} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggleItem} onDelete={onDeleteItem} />;
 
   return (
     <div style={s.recipeDetailRoot}>
@@ -2417,8 +2424,8 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
               <div style={s.listMenuBackdrop} onClick={() => setMenuOpen(false)} />
               <div style={s.listMenu}>
                 {!isGrocery && <button style={s.listMenuItem} className="list-menu-item" onClick={() => { setRenaming(true); setNameDraft(list.name); setMenuOpen(false); }}>✏️ Rename</button>}
-                <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (hasChecked) onClearItems(list.id, true); setMenuOpen(false); }}>🧹 Clear checked</button>
-                <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (list.items.length) onClearItems(list.id, false); setMenuOpen(false); }}>🗑 Clear all</button>
+                <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (hasChecked) onClearItems(list.id, true); setMenuOpen(false); }}>🧹 Delete checked</button>
+                <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (list.items.length) onClearItems(list.id, false); setMenuOpen(false); }}>🗑 Delete all</button>
                 {!isGrocery && <button style={{...s.listMenuItem,color:"#e07a5f"}} className="list-menu-item" onClick={() => { onDeleteList(list.id); setMenuOpen(false); }}>Delete list</button>}
               </div>
             </>
@@ -2452,15 +2459,7 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
             <div style={s.listEmptyStateText}>{isGrocery ? "Your grocery list is empty. Add items above." : "Nothing here yet. Add your first item above."}</div>
           </div>
         ) : (
-          <div style={s.listItems}>
-            {unchecked.map(itemRow)}
-            {hasChecked && (
-              <>
-                <div style={s.listCheckedDivider}>{checked.length} done</div>
-                {checked.map(itemRow)}
-              </>
-            )}
-          </div>
+          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} />
         )}
         <div style={{height:40}} />
       </div>
@@ -2849,9 +2848,10 @@ const s = {
   listItemText: { fontSize:15, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, wordBreak:"break-word" },
   listItemTextChecked: { color:"#6a5a48", textDecoration:"line-through" },
   listItemQty: { color:"#f4c97a", fontWeight:700 },
-  listItemSubRow: { display:"flex", alignItems:"center", gap:7, marginTop:2 },
-  listItemSource: { fontSize:11, color:"#89a98c", fontFamily:"'DM Sans',sans-serif" },
-  listItemDup: { fontSize:9, color:"#e0a84a", background:"#2e2418", border:"1px solid #6a5320", borderRadius:5, padding:"1px 5px", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", fontWeight:700 },
+  listItemSrcNames: { fontSize:11, color:"#89a98c", fontFamily:"'DM Sans',sans-serif", marginTop:3 },
+  listSrcIcon: { background:"none", border:"none", fontSize:14, cursor:"pointer", padding:"4px 4px", flexShrink:0, opacity:0.85, lineHeight:1 },
+  listGroupDivider: { height:1, background:"#3a2e22", margin:"7px 0" },
+  listItemDup: { fontSize:9, color:"#e0a84a", background:"#2e2418", border:"1px solid #6a5320", borderRadius:5, padding:"1px 5px", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", fontWeight:700, marginLeft:7, verticalAlign:"middle", whiteSpace:"nowrap" },
   listItemDel: { background:"none", border:"none", color:"#5a4a38", fontSize:13, cursor:"pointer", padding:"4px 6px", flexShrink:0 },
   addGroceryBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"11px", fontSize:14, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginTop:12 },
   addWeekBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"10px", fontSize:13.5, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginBottom:4 },
@@ -2897,6 +2897,7 @@ const css = `
   .af-toggle-row:hover { border-color: #5a4a36 !important; }
   .list-card:hover { border-color: #5a4a36 !important; transform: translateY(-1px); }
   .list-item-del:hover { color: #e07a5f !important; }
+  .list-src-icon:hover { opacity: 1 !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
   .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }
