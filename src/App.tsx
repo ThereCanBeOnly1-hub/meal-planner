@@ -734,6 +734,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const [afSlots, setAfSlots] = useState(() => new Set());
   const [afPlan, setAfPlan] = useState(null);
   const [afConfirm, setAfConfirm] = useState(false);
+  const [afAvoidLast, setAfAvoidLast] = useState(true);
   const [monthPickerOpen, setMonthPickerOpen] = useState(false);
   const [pickerYear, setPickerYear] = useState(() => new Date(viewedWeekStart + "T00:00:00").getFullYear());
   const [pickerMonth, setPickerMonth] = useState(() => new Date(viewedWeekStart + "T00:00:00").getMonth());
@@ -803,6 +804,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   // Recipe ids used in the previous week, per slot — steered away from for variety.
   const afBuildAvoid = () => {
     const map = {};
+    if (!afAvoidLast) return map;
     MEAL_SLOTS.forEach(slot => {
       const ids = new Set();
       DAYS.forEach(d => { const rid = prevWeekMeals?.[d]?.[slot]?.recipeId; if (rid) ids.add(rid); });
@@ -810,6 +812,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     });
     return map;
   };
+  const afHasPrev = MEAL_SLOTS.some(slot => DAYS.some(d => prevWeekMeals?.[d]?.[slot]?.recipeId));
   const openAutoFill = () => {
     const init = new Set(afEligibleSlots);
     setAfSlots(init);
@@ -848,6 +851,22 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     });
   };
   const afSetMode = (m) => { setAfMode(m); setAfConfirm(false); };
+  const afToggleAvoid = () => {
+    const next = !afAvoidLast;
+    setAfAvoidLast(next);
+    setAfConfirm(false);
+    const avoid = {};
+    if (next) MEAL_SLOTS.forEach(slot => {
+      const ids = new Set();
+      DAYS.forEach(d => { const rid = prevWeekMeals?.[d]?.[slot]?.recipeId; if (rid) ids.add(rid); });
+      avoid[slot] = ids;
+    });
+    setAfPlan(prev => {
+      const np = {};
+      [...afSlots].forEach(slot => { np[slot] = generateSlotPlan(recipes, slot, { avoidIds: avoid[slot] }); });
+      return np;
+    });
+  };
 
   // Resolve the final value for a cell given the chosen mode (kept existing vs picked).
   const afResolveCell = (slot, day) => {
@@ -1216,6 +1235,14 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                   <button style={{...s.afModeBtn,...(afMode==="empty"?s.afModeBtnOn:{})}} onClick={()=>afSetMode("empty")}>Keep them, fill the gaps</button>
                   <button style={{...s.afModeBtn,...(afMode==="replace"?s.afModeBtnOn:{})}} onClick={()=>afSetMode("replace")}>Replace the whole week</button>
                 </div>
+
+                {/* Avoid-last-week toggle (only when there's a planned prior week to avoid) */}
+                {afHasPrev && (
+                  <button style={s.afToggleRow} className="af-toggle-row" onClick={afToggleAvoid}>
+                    <span style={s.afToggleLabel}>Avoid last week's meals</span>
+                    <span style={{...s.afTogglePill,...(afAvoidLast?s.afTogglePillOn:{})}}>{afAvoidLast?"ON":"OFF"}</span>
+                  </button>
+                )}
 
                 {/* Preview */}
                 <div style={s.afPreviewHead}>
@@ -2035,6 +2062,10 @@ const s = {
   afModeRow: { display:"flex", gap:7 },
   afModeBtn: { flex:1, background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:10, padding:"9px 8px", fontSize:12.5, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, lineHeight:1.25 },
   afModeBtnOn: { background:"#2e2418", borderColor:"#c8a878", color:"#f4c97a" },
+  afToggleRow: { display:"flex", alignItems:"center", justifyContent:"space-between", width:"100%", background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:10, padding:"10px 12px", marginTop:8, cursor:"pointer", fontFamily:"'DM Sans',sans-serif", transition:"border-color 0.2s" },
+  afToggleLabel: { fontSize:13, color:"#c8a878", fontWeight:600, fontFamily:"'DM Sans',sans-serif" },
+  afTogglePill: { fontSize:10, background:"#3a2e22", color:"#7a6448", borderRadius:8, padding:"3px 10px", fontWeight:700, letterSpacing:"0.06em" },
+  afTogglePillOn: { background:"#2e2418", color:"#f4c97a", boxShadow:"inset 0 0 0 1px #c8a878" },
   afPreviewHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginTop:16, marginBottom:8 },
   afShuffleBtn: { background:"#241e16", border:"1px solid #4a3c2a", borderRadius:8, padding:"5px 11px", fontSize:12, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
   afEmptyHint: { fontSize:12.5, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", padding:"10px 0", textAlign:"center" },
@@ -2344,6 +2375,7 @@ const css = `
   .extras-btn:hover, .clear-week-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
   .autofill-btn:hover { border-color: #c8a878 !important; background: #3a2e1c !important; }
   .af-shuffle-btn:hover { border-color: #c8a878 !important; color: #f4c97a !important; }
+  .af-toggle-row:hover { border-color: #5a4a36 !important; }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
   .day-chip:hover { background: #2e2418 !important; border-color: #9a7f60 !important; color: #f4e4c4 !important; }
   .day-chip.day-chip-sel, .day-chip.day-chip-sel:hover { background: #3d3020 !important; border-color: #c8a878 !important; color: #f4e4c4 !important; }
