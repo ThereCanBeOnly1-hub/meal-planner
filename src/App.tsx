@@ -247,6 +247,47 @@ const recipeToRow = (r) => ({
 const TAG_TYPE_FIELD = { mealtypes: "mealTypes", diets: "dietTags", cuisines: "cuisineTags" };
 
 // ─── Lists ────────────────────────────────────────────────────────────────────
+// Store layout (Mariano's), ordered to match the walk path: Produce → Meat →
+// Aisles 17→2 → Dairy → Alcohol → Deli → Bakery. Doubles as the category set,
+// the Claude prompt hints, and the Shopping Mode sort order. "other" is last.
+const STORE_LAYOUT = [
+  { id: "produce", label: "Produce", hints: "fresh fruits and vegetables" },
+  { id: "meat", label: "Meat", hints: "fresh meat, poultry, seafood" },
+  { id: "aisle17", label: "Aisle 17", hints: "condiments, rice, peanut butter" },
+  { id: "aisle16", label: "Aisle 16", hints: "pasta, Mexican food, asian food, Italian food" },
+  { id: "aisle15", label: "Aisle 15", hints: "canned vegetables, canned fruit, soup, applesauce" },
+  { id: "aisle14", label: "Aisle 14", hints: "spices, sugar, vinegar, baking, flour" },
+  { id: "aisle13", label: "Aisle 13", hints: "cereal, pancake mix, syrup, oatmeal, granola bars" },
+  { id: "aisle12", label: "Aisle 12", hints: "coffee, tea, dried fruit, candy" },
+  { id: "aisle11", label: "Aisle 11", hints: "snack nuts, chips, popcorn, pretzels, salsas, dips" },
+  { id: "aisle10", label: "Aisle 10", hints: "cookies, bottled water, crackers, juice" },
+  { id: "aisle9", label: "Aisle 9", hints: "soda, energy drinks, natural beverages, bottled tea" },
+  { id: "aisle8", label: "Aisle 8", hints: "pet care, pet food, household cleaners, dish cleaning" },
+  { id: "aisle7", label: "Aisle 7", hints: "foil, plastic wrap, laundry supplies, office supplies" },
+  { id: "aisle6", label: "Aisle 6", hints: "frozen pizza, frozen snacks, frozen meals" },
+  { id: "aisle5", label: "Aisle 5", hints: "ice cream, frozen vegetables, frozen bread, frozen potatoes, frozen breakfast, frozen juices" },
+  { id: "aisle4", label: "Aisle 4", hints: "cosmetics, shaving, shampoo, deodorant, skin care" },
+  { id: "aisle3", label: "Aisle 3", hints: "toothpaste, vitamins, feminine care, first aid" },
+  { id: "aisle2", label: "Aisle 2", hints: "pain medicine, cold and flu medicine" },
+  { id: "dairy", label: "Dairy", hints: "milk, cheese, eggs, yogurt, butter, cream" },
+  { id: "alcohol", label: "Alcohol", hints: "beer, wine, liquor" },
+  { id: "deli", label: "Deli", hints: "deli meats, prepared foods, fresh-sliced cheese" },
+  { id: "bakery", label: "Bakery", hints: "fresh bread, pastries, cakes, bagels" },
+  { id: "other", label: "Not sorted", hints: "anything that doesn't clearly fit a section above" },
+];
+const STORE_SECTION = Object.fromEntries(STORE_LAYOUT.map((s, i) => [s.id, { ...s, order: i }]));
+// Words safe to strip when building a category cache key (don't change the aisle).
+// NOTE: never strip frozen/canned/dried — those determine the aisle.
+const NORM_FILLERS = ["organic", "fresh", "ripe", "large", "small", "medium", "lean", "boneless", "skinless", "raw", "extra", "premium", "fine", "whole", "natural", "unsalted", "salted"];
+const NORM_UNITS = ["lb", "lbs", "oz", "cup", "cups", "tsp", "tbsp", "g", "kg", "ml", "l", "pound", "pounds", "ounce", "ounces", "can", "cans", "package", "pkg", "bunch", "clove", "cloves", "stick", "sticks", "pint", "quart", "gallon", "box", "jar", "bag", "head", "stalk", "sprig"];
+const normIngredient = (name) => {
+  let s = String(name || "").toLowerCase().split(",")[0];
+  s = s.replace(/[^a-z0-9%\s/-]/g, " ").replace(/\b[\d./-]+\b/g, " ");
+  s = s.replace(new RegExp(`\\b(${NORM_UNITS.join("|")})\\b`, "g"), " ");
+  s = s.replace(new RegExp(`\\b(${NORM_FILLERS.join("|")})\\b`, "g"), " ");
+  return s.replace(/\s+/g, " ").trim();
+};
+
 const GROCERY_ID = "grocery"; // fixed id makes the singleton idempotent across devices
 const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const LIST_ICONS = ["📝", "✅", "🧳", "🛠", "🎁", "🏠", "💡", "🛒", "📦", "🌱", "🎉", "✈️"];
@@ -450,6 +491,10 @@ export default function App() {
   const [listView, setListView] = useState(null); // open list id or null
   const [groceryOpen, setGroceryOpen] = useState(false);
   const groceryPopRef = useRef(false);
+  const [ingredientCats, setIngredientCats] = useState({});
+  const [shoppingOpen, setShoppingOpen] = useState(false);
+  const [catStatus, setCatStatus] = useState(""); // "", "loading", or an error message
+  const shoppingPopRef = useRef(false);
   const [customTags, setCustomTags] = useState(() => ({
     mealtypes: loadCustomTags("mealtypes"),
     diets: loadCustomTags("diets"),
@@ -506,6 +551,13 @@ export default function App() {
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, [groceryOpen]);
+
+  // Shopping Mode: close on Android back
+  useEffect(() => {
+    const onPop = () => { if (shoppingOpen) { shoppingPopRef.current = true; setShoppingOpen(false); shoppingPopRef.current = false; } };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [shoppingOpen]);
 
   // Reload when viewed week changes
   useEffect(() => {
@@ -634,7 +686,7 @@ export default function App() {
         sb.get("lists", "?order=created_at.asc").catch(() => []),
         sb.get("list_items", "?order=created_at.asc").catch(() => []),
       ]);
-      const settingsRows = await sb.get("app_settings", "?key=eq.custom_tags").catch(() => []);
+      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories)").catch(() => []);
 
       const parseWeekRows = (rows) => {
         const w = initialWeek();
@@ -680,9 +732,10 @@ export default function App() {
       builtLists.sort((a, b) => (a.type === "grocery" ? -1 : b.type === "grocery" ? 1 : (a.position ?? 0) - (b.position ?? 0)));
       setLists(builtLists);
 
-      if (settingsRows.length > 0 && settingsRows[0].value) {
-        setCustomTags(prev => ({ ...prev, ...settingsRows[0].value }));
-      }
+      const customTagsRow = settingsRows.find(r => r.key === "custom_tags");
+      if (customTagsRow && customTagsRow.value) setCustomTags(prev => ({ ...prev, ...customTagsRow.value }));
+      const catsRow = settingsRows.find(r => r.key === "ingredient_categories");
+      if (catsRow && catsRow.value) setIngredientCats(catsRow.value);
 
       hasLoadedRef.current = true;
       setSyncStatus("synced");
@@ -853,6 +906,43 @@ export default function App() {
   };
   const addWeekToGrocery = () => addRecipesToGrocery(weekRecipeList());
 
+  // ─── Categorization (Shopping Mode) ──────────────────────────────────────────
+  const catOf = (item) => ingredientCats[normIngredient(item.text)] || "other";
+  const saveIngredientCats = (next) => { if (isConfigured) sb.upsert("app_settings", [{ key: "ingredient_categories", value: next }], "key").catch(e => console.error("Cat cache save:", e)); };
+
+  // Categorize any grocery items whose ingredient isn't cached yet (one batched call).
+  const categorizeGroceryItems = async () => {
+    const grocery = lists.find(l => l.type === "grocery");
+    if (!grocery) return;
+    const misses = new Set();
+    grocery.items.forEach(it => { const k = normIngredient(it.text); if (k && !ingredientCats[k]) misses.add(k); });
+    if (misses.size === 0) { setCatStatus(""); return; }
+    setCatStatus("loading");
+    try {
+      const resp = await fetch("/api/categorize", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names: [...misses], sections: STORE_LAYOUT }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { setCatStatus(data.message || "Couldn't sort items into aisles."); return; }
+      const next = { ...ingredientCats };
+      Object.entries(data.categories || {}).forEach(([name, section]) => { next[normIngredient(name)] = section; });
+      setIngredientCats(next);
+      saveIngredientCats(next);
+      setCatStatus("");
+    } catch (e) { console.error("Categorize:", e); setCatStatus("Couldn't reach the categorizer."); }
+  };
+  // Manual correction — remembered for that ingredient going forward.
+  const setItemAisle = (item, sectionId) => {
+    const key = normIngredient(item.text); if (!key) return;
+    const next = { ...ingredientCats, [key]: sectionId };
+    setIngredientCats(next);
+    saveIngredientCats(next);
+  };
+
+  const openShopping = () => { setShoppingOpen(true); setCatStatus(""); history.pushState({ overlay: "shopping" }, ""); categorizeGroceryItems(); };
+  const closeShopping = () => { setShoppingOpen(false); if (!shoppingPopRef.current) history.back(); };
+
   return (
     <div style={s.appRoot}>
       <style>{css}</style>
@@ -885,7 +975,8 @@ export default function App() {
           <ListsView lists={lists} openId={listView} syncStatus={syncStatus}
             onOpen={(id) => navigate("lists", id ? { listId: id } : null)}
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
-            onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems} />
+            onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
+            onShopping={openShopping} />
         )}
       </div>
       <nav style={s.bottomNav}>
@@ -923,6 +1014,12 @@ export default function App() {
           onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
           weekRecipeCount={weekRecipeList().length} onAddWeek={addWeekToGrocery}
           onOpenFull={() => { setGroceryOpen(false); navigate("lists", { listId: GROCERY_ID }); }} />
+      )}
+
+      {shoppingOpen && (
+        <ShoppingMode list={lists.find(l => l.type === "grocery")} cats={ingredientCats} catStatus={catStatus}
+          onToggle={toggleListItem} onSetAisle={setItemAisle} onAddItem={addListItem}
+          onRecategorize={categorizeGroceryItems} onClose={closeShopping} />
       )}
     </div>
   );
@@ -973,6 +1070,103 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
           <button style={{...s.btnClear,marginLeft:"auto"}} onClick={onOpenFull}>Open full list →</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Shopping Mode ────────────────────────────────────────────────────────────
+function ShoppingMode({ list, cats, catStatus, onToggle, onSetAisle, onAddItem, onRecategorize, onClose }) {
+  const [checkOrder, setCheckOrder] = useState([]);
+  const [pickerItem, setPickerItem] = useState(null);
+  const [addInput, setAddInput] = useState("");
+  const items = list?.items || [];
+  const total = items.length;
+  const doneCount = items.filter(i => i.checked).length;
+  const catFor = (it) => cats[normIngredient(it.text)] || "other";
+
+  const toggle = (it) => {
+    const willCheck = !it.checked;
+    setCheckOrder(prev => willCheck ? [it.id, ...prev.filter(x => x !== it.id)] : prev.filter(x => x !== it.id));
+    onToggle(list.id, it.id);
+  };
+  const submitAdd = () => { const t = addInput.trim(); if (!t) return; onAddItem(list.id, t); setAddInput(""); };
+
+  const unchecked = items.filter(i => !i.checked);
+  const bySection = {};
+  unchecked.forEach(it => { const sec = catFor(it); (bySection[sec] ||= []).push(it); });
+  const orderedSections = STORE_LAYOUT.filter(sec => bySection[sec.id]?.length);
+  const checkedItems = items.filter(i => i.checked)
+    .sort((a, b) => { const ia = checkOrder.indexOf(a.id), ib = checkOrder.indexOf(b.id); return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib); });
+
+  const row = (it) => {
+    const m = formatMeasures(it.measures);
+    return (
+      <div key={it.id} style={{...s.shopRow,...(it.checked?s.shopRowDone:{})}} className="shop-row" onClick={() => toggle(it)}>
+        <span style={{...s.shopCheck,...(it.checked?s.shopCheckOn:{})}}>{it.checked ? "✓" : ""}</span>
+        <span style={{...s.shopText,...(it.checked?s.shopTextDone:{})}}>{m && <span style={s.shopQty}>{m} </span>}{it.text}</span>
+        <button style={s.shopAisleBtn} className="shop-aisle-btn" onClick={(e) => { e.stopPropagation(); setPickerItem(it); }}>📍</button>
+      </div>
+    );
+  };
+
+  return (
+    <div style={s.shopRoot}>
+      <div style={s.shopTopBar}>
+        <button style={s.detailBackBtn} className="back-btn" onClick={onClose}>← Done</button>
+        <div style={s.shopTitle}>Shopping</div>
+        <div style={s.shopProgress}>{doneCount}/{total}</div>
+      </div>
+      <div style={s.shopProgressTrack}><div style={{...s.shopProgressFill, width: total ? `${(doneCount / total) * 100}%` : "0%"}} /></div>
+
+      {catStatus === "loading" && <div style={s.shopBanner}>🧮 Sorting items into aisles…</div>}
+      {catStatus && catStatus !== "loading" && (
+        <div style={{...s.shopBanner,...s.shopBannerErr}}>⚠️ {catStatus}<button style={s.shopRetry} className="shop-retry" onClick={onRecategorize}>Retry</button></div>
+      )}
+
+      <div style={s.shopBody}>
+        {total === 0 ? (
+          <div style={s.listEmptyState}><div style={{fontSize:30,marginBottom:8}}>🛒</div><div style={s.listEmptyStateText}>Grocery list is empty.</div></div>
+        ) : (
+          <>
+            {orderedSections.map(sec => (
+              <div key={sec.id} style={s.shopSection}>
+                <div style={s.shopSectionHead}>
+                  <span style={s.shopSectionLabel}>{sec.label}</span>
+                  {sec.id !== "other" && <span style={s.shopSectionHint}>{sec.hints.split(",")[0]}</span>}
+                </div>
+                {bySection[sec.id].map(row)}
+              </div>
+            ))}
+            {checkedItems.length > 0 && (
+              <div style={s.shopSection}>
+                <div style={s.shopDoneHead}>✓ In the cart ({checkedItems.length})</div>
+                {checkedItems.map(row)}
+              </div>
+            )}
+          </>
+        )}
+        <div style={{height:90}} />
+      </div>
+
+      <div style={s.shopAddBar}>
+        <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder="Add an item…" value={addInput}
+          onChange={e => setAddInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submitAdd(); }} />
+        <button style={{...s.btnSave,...(addInput.trim()?{}:s.btnDisabled)}} onClick={submitAdd}>Add</button>
+      </div>
+
+      {pickerItem && (
+        <div style={s.overlay} onClick={() => setPickerItem(null)}>
+          <div style={s.shopPicker} onClick={e => e.stopPropagation()} className="modal-in">
+            <div style={s.shopPickerTitle}>Move “{abbrev(pickerItem.text, 28)}” to…</div>
+            <div style={s.shopPickerList}>
+              {STORE_LAYOUT.map(sec => (
+                <button key={sec.id} style={{...s.shopPickerItem,...(catFor(pickerItem)===sec.id?s.shopPickerItemOn:{})}}
+                  onClick={() => { onSetAisle(pickerItem, sec.id); setPickerItem(null); }}>{sec.label}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2349,12 +2543,12 @@ function ListItemsList({ items, listId, onToggle, onDelete }) {
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onShopping }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
-      onUpdateList={onUpdateList} onDeleteList={onDeleteList} />;
+      onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
   }
   return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} />;
 }
@@ -2427,7 +2621,7 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList }) {
   );
 }
 
-function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onUpdateList, onDeleteList }) {
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onUpdateList, onDeleteList, onShopping }) {
   const [input, setInput] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -2472,6 +2666,10 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
             <h1 style={{...s.title,margin:0}}>{list.name}</h1>
           )}
         </div>
+
+        {isGrocery && list.items.length > 0 && (
+          <button style={s.shopModeBtn} className="add-grocery-btn" onClick={onShopping}>🛒 Shopping Mode</button>
+        )}
 
         <div style={s.listAddRow}>
           <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder="Add an item…" value={input}
@@ -2901,6 +3099,38 @@ const s = {
   groceryDrawerTitle: { display:"flex", alignItems:"center", fontSize:19, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif" },
   groceryDrawerBody: { flex:1, overflowY:"auto", marginTop:4 },
   groceryDrawerFoot: { display:"flex", alignItems:"center", gap:8, paddingTop:12, marginTop:8, borderTop:"1px solid #3a2e22" },
+
+  // Shopping Mode
+  shopModeBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"12px", fontSize:15, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:700, marginBottom:16 },
+  shopRoot: { position:"fixed", inset:0, background:"#15110c", zIndex:120, display:"flex", flexDirection:"column" },
+  shopTopBar: { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 16px 10px", background:"#1c1712", borderBottom:"1px solid #2a2018" },
+  shopTitle: { fontSize:16, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif" },
+  shopProgress: { fontSize:14, fontWeight:700, color:"#7ecfcf", fontFamily:"'DM Sans',sans-serif", minWidth:46, textAlign:"right" },
+  shopProgressTrack: { height:3, background:"#2a2018" },
+  shopProgressFill: { height:"100%", background:"linear-gradient(90deg,#7ecfcf,#8ac878)", transition:"width 0.25s" },
+  shopBanner: { padding:"10px 16px", background:"#1f2e2c", color:"#7ecfcf", fontSize:13, fontFamily:"'DM Sans',sans-serif", display:"flex", alignItems:"center", gap:8 },
+  shopBannerErr: { background:"#2e1f1a", color:"#f0a890" },
+  shopRetry: { marginLeft:"auto", background:"#3a2418", border:"1px solid #6a4a30", borderRadius:7, padding:"4px 12px", fontSize:12, color:"#f4c97a", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  shopBody: { flex:1, overflowY:"auto", padding:"8px 14px 0", WebkitOverflowScrolling:"touch" },
+  shopSection: { marginBottom:14 },
+  shopSectionHead: { display:"flex", alignItems:"baseline", gap:8, padding:"8px 4px 6px", borderBottom:"1px solid #2a2018", marginBottom:4, position:"sticky", top:0, background:"#15110c", zIndex:1 },
+  shopSectionLabel: { fontSize:14, fontWeight:800, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", letterSpacing:"0.02em" },
+  shopSectionHint: { fontSize:11, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  shopDoneHead: { fontSize:12, color:"#6a8a70", letterSpacing:"0.08em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", padding:"14px 4px 6px", borderBottom:"1px solid #2a2018", marginBottom:4 },
+  shopRow: { display:"flex", alignItems:"center", gap:13, padding:"14px 6px", borderBottom:"1px solid #201a13", cursor:"pointer", userSelect:"none" },
+  shopRowDone: { opacity:0.55 },
+  shopCheck: { width:28, height:28, borderRadius:8, border:"2px solid #4a5c4a", background:"#1c1712", color:"#1c1712", fontSize:17, fontWeight:800, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
+  shopCheckOn: { background:"#8ac878", borderColor:"#8ac878" },
+  shopText: { flex:1, fontSize:17, color:"#f0e4d0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.3, wordBreak:"break-word" },
+  shopTextDone: { textDecoration:"line-through", color:"#7a6a55" },
+  shopQty: { color:"#f4c97a", fontWeight:700 },
+  shopAisleBtn: { background:"none", border:"none", fontSize:15, cursor:"pointer", padding:"6px", flexShrink:0, opacity:0.5 },
+  shopAddBar: { display:"flex", gap:8, alignItems:"center", padding:"10px 14px", background:"#1c1712", borderTop:"1px solid #2a2018" },
+  shopPicker: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:16, padding:"16px", width:"100%", maxWidth:360, maxHeight:"75vh", display:"flex", flexDirection:"column" },
+  shopPickerTitle: { fontSize:15, fontWeight:700, color:"#f4e4c4", fontFamily:"'DM Sans',sans-serif", marginBottom:12 },
+  shopPickerList: { display:"flex", flexDirection:"column", gap:4, overflowY:"auto" },
+  shopPickerItem: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:9, padding:"11px 13px", fontSize:14, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left" },
+  shopPickerItemOn: { background:"#2e2418", borderColor:"#c8a878", color:"#f4c97a", fontWeight:700 },
 };
 
 const chips = {
@@ -2925,6 +3155,10 @@ const css = `
   .list-card:hover { border-color: #5a4a36 !important; transform: translateY(-1px); }
   .list-item-del:hover { color: #e07a5f !important; }
   .list-src-icon:hover { opacity: 1 !important; }
+  .shop-row:active { background: #221a12; }
+  .shop-aisle-btn:hover { opacity: 1 !important; }
+  .shop-retry:hover { background: #4a2e1c !important; }
+  .shop-picker-item:hover { border-color: #c8a878 !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
   .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }

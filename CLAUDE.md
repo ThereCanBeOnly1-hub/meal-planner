@@ -49,6 +49,7 @@
 - **RecipesView**: router between RecipeGrid / RecipeDetail / RecipeEditor
 - **ListsView**: router between ListIndex (grocery pinned + custom list cards + create) and ListDetail (add/check/delete items, clear checked/all, rename/delete list)
 - **GroceryDrawer**: app-level slide-out grocery quick-panel, opened by a floating 🛒 button (hidden on the Lists tab); reuses the App-level list ops so adds/checks sync live. Uses overlay history pattern (`{overlay:"grocery"}`); "Open full list →" jumps to the Lists tab grocery view
+- **ShoppingMode**: full-screen in-store view (button on grocery list). Groups items by store aisle in walk order, big tap rows, qty shown, progress bar, checked items drop to "In the cart" newest-first, 📍 reassigns an item's aisle (remembered). Overlay history pattern (`{overlay:"shopping"}`)
 - **TagPicker**: reusable tag selector used in RecipeEditor, supports custom tags via props; "Manage" toggle reveals an ✕ on custom chips to delete them (built-in tags can't be deleted). Deleting calls `deleteCustomTag`, which removes the tag from the vocab AND strips it from every recipe using it (via `recipeToRow` bulk upsert), so no recipe is left referencing a removed tag.
 - **RecipeGrid**: recipe list with collapsed Meal/Diet/Cuisine filter dropdowns; header has Import + New buttons
 - **ImportModal**: "From link" / "From photo" recipe import; calls `/api/import-recipe`, normalizes result via `normalizeImported()`, then opens RecipeEditor pre-filled for review
@@ -63,6 +64,14 @@
 - Errors are mapped to clear user messages: low credit balance → "API balance too low…", unfetchable/paywalled URL, no-recipe-found, missing/invalid key.
 - Photo import sends a 1568px copy for OCR and keeps a 600px copy as the recipe photo; nothing auto-saves — user always reviews in the editor first.
 - ImportModal uses the overlay history pattern: pushes `{overlay:"import"}`; all exits (✕/backdrop/success/back) call `history.back()`, and a `pendingRef` defers opening the editor until that entry unwinds (keeps Android back single-press clean).
+
+## Shopping Mode / aisle categorization
+
+- `STORE_LAYOUT` (module const in App.tsx) = ordered store sections (Mariano's, pre-seeded) with `{id,label,hints}`; order is the walk path. Doubles as category set, Claude prompt hints, and sort order. `"other"` ("Not sorted") is last.
+- `normIngredient` builds a cache key from an item name (strips quantities/units/filler words, drops text after a comma) — note it deliberately keeps frozen/canned/dried since those change the aisle.
+- `ingredientCats` cache (normName → sectionId) persists in `app_settings` key `ingredient_categories`, shared across devices.
+- `api/categorize.ts` (Vercel, reuses `ANTHROPIC_API_KEY`): batched Claude call, takes uncached names + STORE_LAYOUT, returns name→sectionId (enum-constrained). Called by `categorizeGroceryItems` only for cache misses, on entering Shopping Mode. Low-balance error surfaces in the Shopping Mode banner.
+- `setItemAisle` overrides + remembers an ingredient's aisle in the cache.
 
 ## Deployment
 
