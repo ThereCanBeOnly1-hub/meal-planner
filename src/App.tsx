@@ -251,11 +251,42 @@ const GROCERY_ID = "grocery"; // fixed id makes the singleton idempotent across 
 const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const LIST_ICONS = ["📝", "✅", "🧳", "🛠", "🎁", "🏠", "💡", "🛒", "📦", "🌱", "🎉", "✈️"];
 const listToRow = (l) => ({ id: l.id, name: l.name, type: l.type, icon: l.icon, position: l.position ?? 0, updated_at: new Date().toISOString() });
+// measures[] (quantities) is stored as JSON in `qty`; sources[] (contributing
+// recipes) as JSON in `source_recipe_id`. Empty arrays store as null.
 const listItemToRow = (it, listId) => ({
   id: it.id, list_id: listId, text: it.text, checked: !!it.checked, position: it.position ?? 0,
-  qty: it.qty ?? null, unit: it.unit ?? null, category: it.category ?? null, source_recipe_id: it.sourceRecipeId ?? null,
+  qty: it.measures && it.measures.length ? JSON.stringify(it.measures) : null,
+  unit: null, category: it.category || null,
+  source_recipe_id: it.sources && it.sources.length ? JSON.stringify(it.sources) : null,
   updated_at: new Date().toISOString(),
 });
+const parseJsonArr = (raw) => { if (!raw) return []; try { const v = typeof raw === "string" ? JSON.parse(raw) : raw; return Array.isArray(v) ? v : []; } catch { return []; } };
+
+// Normalized key for matching the same grocery ingredient (drops prep notes after a comma).
+const groceryKey = (name) => String(name || "").trim().toLowerCase().split(",")[0].replace(/\s+/g, " ").trim();
+// Turn a recipe ingredient amount/unit into a measure: numeric {amount,unit} when parseable, else {text}.
+const ingredientToMeasure = (amount, unit) => {
+  const a = String(amount || "").trim(), u = String(unit || "").trim();
+  if (!a && !u) return null;
+  const n = parseQty(a);
+  if (n !== null) return { amount: n, unit: u };
+  return { text: [a, u].filter(Boolean).join(" ") };
+};
+// Normalize a unit for comparison (so "cup"/"cups", "lb"/"lbs" merge).
+const normUnit = (u) => String(u || "").trim().toLowerCase().replace(/s$/, "");
+// Merge incoming measures into existing: sum numerics with matching units, else append.
+const mergeMeasures = (existing, incoming) => {
+  const out = (existing || []).map(m => ({ ...m }));
+  (incoming || []).forEach(im => {
+    if (im.amount != null) {
+      const match = out.find(m => m.amount != null && normUnit(m.unit) === normUnit(im.unit));
+      if (match) { match.amount += im.amount; return; }
+    }
+    out.push({ ...im });
+  });
+  return out;
+};
+const formatMeasures = (measures) => (measures || []).map(m => m.amount != null ? `${formatQty(m.amount)}${m.unit ? ` ${m.unit}` : ""}` : m.text).filter(Boolean).join(" + ");
 
 // ─── Auto-Fill engine ─────────────────────────────────────────────────────────
 const AF_WEEKDAYS = DAYS.slice(0, 5); // Mon–Fri
@@ -610,7 +641,7 @@ export default function App() {
         id: l.id, name: l.name, type: l.type || "custom", icon: l.icon || "📝", position: l.position ?? 0,
         items: (itemsByList[l.id] || []).map(it => ({
           id: it.id, text: it.text || "", checked: !!it.checked, position: it.position ?? 0,
-          qty: it.qty || "", unit: it.unit || "", category: it.category || "", sourceRecipeId: it.source_recipe_id || null,
+          category: it.category || "", measures: parseJsonArr(it.qty), sources: parseJsonArr(it.source_recipe_id),
         })).sort(byPos),
       }));
       if (!builtLists.some(l => l.type === "grocery")) {
@@ -724,7 +755,7 @@ export default function App() {
     const t = text.trim(); if (!t) return;
     const list = lists.find(l => l.id === listId);
     const pos = (list ? list.items.reduce((m, i) => Math.max(m, i.position || 0), 0) : 0) + 1;
-    const item = { id: genId(), text: t, checked: false, position: pos, qty: "", unit: "", category: "", sourceRecipeId: null };
+    const item = { id: genId(), text: t, checked: false, position: pos, category: "", measures: [], sources: [] };
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
     syncWrite("Add item:", sb.upsert("list_items", [listItemToRow(item, listId)], "id"));
   };
@@ -742,6 +773,58 @@ export default function App() {
     const q = onlyChecked ? `list_id=eq.${listId}&checked=eq.true` : `list_id=eq.${listId}`;
     syncWrite("Clear items:", sb.del("list_items", q));
   };
+
+  // Add one or more recipes' ingredients to the grocery list. Recipe-sourced
+  // items dedupe/aggregate against each other and existing recipe-sourced lines;
+  // manual items are never merged into. Returns {added, merged}.
+  const addRecipesToGrocery = (recipesToAdd) => {
+    const grocery = lists.find(l => l.type === "grocery");
+    if (!grocery) return { added: 0, merged: 0 };
+    const candByKey = new Map();
+    recipesToAdd.forEach(rec => (rec.ingredients || []).forEach(ing => {
+      const name = (ing.name || "").trim(); if (!name) return;
+      const key = groceryKey(name);
+      const measure = ingredientToMeasure(ing.amount, ing.unit);
+      const src = { id: rec.id, name: rec.name };
+      let c = candByKey.get(key);
+      if (!c) { c = { text: name, measures: [], sources: [] }; candByKey.set(key, c); }
+      if (measure) c.measures = mergeMeasures(c.measures, [measure]);
+      if (!c.sources.some(s => s.id === src.id)) c.sources.push(src);
+    }));
+    if (candByKey.size === 0) return { added: 0, merged: 0 };
+
+    let added = 0, merged = 0;
+    const rows = [];
+    const items = grocery.items.map(it => ({ ...it, measures: [...(it.measures || [])], sources: [...(it.sources || [])] }));
+    let maxPos = items.reduce((mx, i) => Math.max(mx, i.position || 0), 0);
+    const newItems = [];
+    candByKey.forEach((c, key) => {
+      const existing = items.find(it => (it.sources && it.sources.length > 0) && groceryKey(it.text) === key);
+      if (existing) {
+        existing.measures = mergeMeasures(existing.measures, c.measures);
+        c.sources.forEach(s => { if (!existing.sources.some(x => x.id === s.id)) existing.sources.push(s); });
+        rows.push(listItemToRow(existing, grocery.id));
+        merged++;
+      } else {
+        const item = { id: genId(), text: c.text, checked: false, position: ++maxPos, category: "", measures: c.measures, sources: c.sources };
+        newItems.push(item);
+        rows.push(listItemToRow(item, grocery.id));
+        added++;
+      }
+    });
+    const finalItems = [...items, ...newItems];
+    setLists(prev => prev.map(l => l.id === grocery.id ? { ...l, items: finalItems } : l));
+    if (rows.length) syncWrite("Add to grocery:", sb.upsert("list_items", rows, "id"));
+    return { added, merged };
+  };
+  const addRecipeToGrocery = (recipe) => addRecipesToGrocery([recipe]);
+  // Recipes linked to the currently-viewed week's planned meals.
+  const weekRecipeList = () => {
+    const ids = new Set();
+    DAYS.forEach(d => MEAL_SLOTS.forEach(slot => { const rid = week[d]?.[slot]?.recipeId; if (rid) ids.add(rid); }));
+    return [...ids].map(id => recipes.find(r => r.id === id)).filter(Boolean);
+  };
+  const addWeekToGrocery = () => addRecipesToGrocery(weekRecipeList());
 
   return (
     <div style={s.appRoot}>
@@ -768,7 +851,8 @@ export default function App() {
         {tab === "recipes" && (
           <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
             onSave={saveRecipe} onDelete={deleteRecipe}
-            customTags={customTags} onAddCustomTag={addCustomTag} onDeleteCustomTag={deleteCustomTag} />
+            customTags={customTags} onAddCustomTag={addCustomTag} onDeleteCustomTag={deleteCustomTag}
+            onAddToGrocery={addRecipeToGrocery} />
         )}
         {tab === "lists" && (
           <ListsView lists={lists} openId={listView} syncStatus={syncStatus}
@@ -810,6 +894,7 @@ export default function App() {
           list={lists.find(l => l.type === "grocery")}
           onClose={closeGrocery}
           onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
+          weekRecipeCount={weekRecipeList().length} onAddWeek={addWeekToGrocery}
           onOpenFull={() => { setGroceryOpen(false); navigate("lists", { listId: GROCERY_ID }); }} />
       )}
     </div>
@@ -817,20 +902,21 @@ export default function App() {
 }
 
 // ─── Grocery quick-drawer ─────────────────────────────────────────────────────
-function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onOpenFull }) {
+function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onOpenFull, weekRecipeCount, onAddWeek }) {
   const [input, setInput] = useState("");
+  const [msg, setMsg] = useState("");
   const items = list?.items || [];
   const unchecked = items.filter(i => !i.checked);
   const checked = items.filter(i => i.checked);
+  const dupKeys = computeDupKeys(items);
   const submit = () => { const t = input.trim(); if (!t || !list) return; onAddItem(list.id, t); setInput(""); };
+  const addWeek = () => {
+    const { added, merged } = onAddWeek();
+    setMsg(added + merged === 0 ? "Nothing to add from this week" : `✓ Added ${added}${merged ? `, merged ${merged}` : ""}`);
+    setTimeout(() => setMsg(""), 2600);
+  };
 
-  const row = (it) => (
-    <div key={it.id} style={s.listItemRow}>
-      <button style={{...s.listCheck,...(it.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggleItem(list.id, it.id)}>{it.checked ? "✓" : ""}</button>
-      <span style={{...s.listItemText,...(it.checked?s.listItemTextChecked:{})}}>{it.text}</span>
-      <button style={s.listItemDel} className="list-item-del" onClick={() => onDeleteItem(list.id, it.id)}>✕</button>
-    </div>
-  );
+  const row = (it) => <ListItemRow key={it.id} item={it} listId={list.id} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggleItem} onDelete={onDeleteItem} />;
 
   return (
     <div style={s.groceryOverlay} onClick={onClose}>
@@ -845,6 +931,11 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
             onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submit(); }} />
           <button style={{...s.btnSave,...(input.trim()?{}:s.btnDisabled)}} onClick={submit}>Add</button>
         </div>
+
+        {weekRecipeCount > 0 && (
+          <button style={s.addWeekBtn} className="add-grocery-btn" onClick={addWeek}>🍽 Add this week's meals ({weekRecipeCount})</button>
+        )}
+        {msg && <div style={s.groceryMsg}>{msg}</div>}
 
         <div style={s.groceryDrawerBody}>
           {items.length === 0 ? (
@@ -1606,9 +1697,9 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 }
 
 // ─── Recipes View ─────────────────────────────────────────────────────────────
-function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag }) {
+function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag, onAddToGrocery }) {
   if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(recipes.some(r=>r.id===view.recipe?.id)?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} onDeleteCustomTag={onDeleteCustomTag} />;
-  if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} />;
+  if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} onAddToGrocery={onAddToGrocery} />;
   return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
 
@@ -1913,10 +2004,18 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
 }
 
 // ─── Recipe Detail ────────────────────────────────────────────────────────────
-function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
+function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery }) {
   const [servings, setServings] = useState(recipe.baseServings || 4);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [groceryMsg, setGroceryMsg] = useState("");
   const isRestoringRef = useRef(false);
+
+  const addToGrocery = () => {
+    const { added, merged } = onAddToGrocery(recipe);
+    if (added + merged === 0) setGroceryMsg("No ingredients to add");
+    else setGroceryMsg(`✓ Added ${added}${merged ? `, merged ${merged}` : ""} to grocery`);
+    setTimeout(() => setGroceryMsg(""), 2600);
+  };
 
   useEffect(() => {
     const onPopState = () => {
@@ -1987,6 +2086,8 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack }) {
                 );
               })}
             </div>
+            <button style={s.addGroceryBtn} className="add-grocery-btn" onClick={addToGrocery}>🛒 Add to grocery list</button>
+            {groceryMsg && <div style={s.groceryMsg}>{groceryMsg}</div>}
           </div>
         )}
 
@@ -2179,6 +2280,37 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
 }
 
 // ─── Lists View ───────────────────────────────────────────────────────────────
+// Keys present in BOTH a manual and a recipe-sourced item (the "duplicate" case).
+const computeDupKeys = (items) => {
+  const manual = new Set(), recipe = new Set();
+  (items || []).forEach(it => { const k = groceryKey(it.text); (it.sources && it.sources.length ? recipe : manual).add(k); });
+  return new Set([...manual].filter(k => recipe.has(k)));
+};
+
+function ListItemRow({ item, listId, isDup, onToggle, onDelete }) {
+  const measures = formatMeasures(item.measures);
+  const src = item.sources && item.sources.length
+    ? (item.sources.length === 1 ? `from ${item.sources[0].name}` : `from ${item.sources.length} recipes`)
+    : null;
+  return (
+    <div style={s.listItemRow}>
+      <button style={{...s.listCheck,...(item.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggle(listId, item.id)}>{item.checked ? "✓" : ""}</button>
+      <div style={{flex:1, minWidth:0}}>
+        <div style={{...s.listItemText,...(item.checked?s.listItemTextChecked:{})}}>
+          {measures && <span style={s.listItemQty}>{measures} </span>}{item.text}
+        </div>
+        {(src || isDup) && (
+          <div style={s.listItemSubRow}>
+            {src && <span style={s.listItemSource}>🍽 {src}</span>}
+            {isDup && <span style={s.listItemDup} title="Also on the list from another source">dup</span>}
+          </div>
+        )}
+      </div>
+      <button style={s.listItemDel} className="list-item-del" onClick={() => onDelete(listId, item.id)}>✕</button>
+    </div>
+  );
+}
+
 function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
@@ -2271,15 +2403,8 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
   const submit = () => { const t = input.trim(); if (!t) return; onAddItem(list.id, t); setInput(""); };
   const saveName = () => { const n = nameDraft.trim(); if (n) onUpdateList(list.id, { name: n }); setRenaming(false); };
 
-  const itemRow = (it) => (
-    <div key={it.id} style={s.listItemRow}>
-      <button style={{...s.listCheck,...(it.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggleItem(list.id, it.id)}>
-        {it.checked ? "✓" : ""}
-      </button>
-      <span style={{...s.listItemText,...(it.checked?s.listItemTextChecked:{})}}>{it.text}</span>
-      <button style={s.listItemDel} className="list-item-del" onClick={() => onDeleteItem(list.id, it.id)}>✕</button>
-    </div>
-  );
+  const dupKeys = computeDupKeys(list.items);
+  const itemRow = (it) => <ListItemRow key={it.id} item={it} listId={list.id} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggleItem} onDelete={onDeleteItem} />;
 
   return (
     <div style={s.recipeDetailRoot}>
@@ -2721,9 +2846,16 @@ const s = {
   listItemRow: { display:"flex", alignItems:"center", gap:11, padding:"10px 2px", borderBottom:"1px solid #221b13" },
   listCheck: { width:24, height:24, borderRadius:7, border:"1.5px solid #4a3c2a", background:"#1c1712", color:"#1c1712", fontSize:14, fontWeight:800, cursor:"pointer", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
   listCheckOn: { background:"#8ac878", borderColor:"#8ac878", color:"#1c1712" },
-  listItemText: { flex:1, fontSize:15, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, wordBreak:"break-word" },
+  listItemText: { fontSize:15, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, wordBreak:"break-word" },
   listItemTextChecked: { color:"#6a5a48", textDecoration:"line-through" },
+  listItemQty: { color:"#f4c97a", fontWeight:700 },
+  listItemSubRow: { display:"flex", alignItems:"center", gap:7, marginTop:2 },
+  listItemSource: { fontSize:11, color:"#89a98c", fontFamily:"'DM Sans',sans-serif" },
+  listItemDup: { fontSize:9, color:"#e0a84a", background:"#2e2418", border:"1px solid #6a5320", borderRadius:5, padding:"1px 5px", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", fontWeight:700 },
   listItemDel: { background:"none", border:"none", color:"#5a4a38", fontSize:13, cursor:"pointer", padding:"4px 6px", flexShrink:0 },
+  addGroceryBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"11px", fontSize:14, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginTop:12 },
+  addWeekBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"10px", fontSize:13.5, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginBottom:4 },
+  groceryMsg: { fontSize:12.5, color:"#8ac878", fontFamily:"'DM Sans',sans-serif", textAlign:"center", marginTop:8 },
   listCheckedDivider: { fontSize:10, color:"#7a6448", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", margin:"16px 0 6px" },
   listEmptyState: { textAlign:"center", padding:"36px 16px", color:"#7a6448" },
   listEmptyStateText: { fontSize:13.5, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", lineHeight:1.5 },
@@ -2767,6 +2899,7 @@ const css = `
   .list-item-del:hover { color: #e07a5f !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
+  .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }
   .grocery-fab:hover { transform: scale(1.06); }
   .grocery-fab:active { transform: scale(0.96); }
   @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
