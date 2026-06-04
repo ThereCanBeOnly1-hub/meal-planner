@@ -691,7 +691,8 @@ export default function App() {
   const syncWrite = (label, p) => { if (isConfigured) p.then(() => setSyncStatus("synced")).catch(e => { console.error(label, e); setSyncStatus("error"); }); };
 
   const addList = (name, icon) => {
-    const list = { id: genId(), name: name.trim() || "Untitled List", type: "custom", icon: icon || "📝", position: Date.now(), items: [] };
+    const pos = lists.reduce((m, l) => Math.max(m, l.position || 0), 0) + 1;
+    const list = { id: genId(), name: name.trim() || "Untitled List", type: "custom", icon: icon || "📝", position: pos, items: [] };
     setLists(prev => [...prev, list]);
     syncWrite("Add list:", sb.upsert("lists", [listToRow(list)], "id"));
     return list.id;
@@ -709,7 +710,9 @@ export default function App() {
   };
   const addListItem = (listId, text) => {
     const t = text.trim(); if (!t) return;
-    const item = { id: genId(), text: t, checked: false, position: Date.now(), qty: "", unit: "", category: "", sourceRecipeId: null };
+    const list = lists.find(l => l.id === listId);
+    const pos = (list ? list.items.reduce((m, i) => Math.max(m, i.position || 0), 0) : 0) + 1;
+    const item = { id: genId(), text: t, checked: false, position: pos, qty: "", unit: "", category: "", sourceRecipeId: null };
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
     syncWrite("Add item:", sb.upsert("list_items", [listItemToRow(item, listId)], "id"));
   };
