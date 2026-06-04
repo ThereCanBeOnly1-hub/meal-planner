@@ -276,11 +276,13 @@ const afLayBlocks = (days, picks) => {
   return out;
 };
 
-// Assignment for one slot: { [day]: {recipeId, name} | null }.
-const generateSlotPlan = (recipes, slot) => {
+// Day-by-day signature of a slot plan, for detecting identical re-rolls.
+const afPlanKey = (slotPlan) => DAYS.map(d => slotPlan?.[d]?.recipeId ?? "").join("|");
+
+// Build one slot assignment from a given pool: { [day]: {recipeId, name} | null }.
+const afBuildSlotPlan = (pool, slot) => {
   const result = {};
   DAYS.forEach(d => (result[d] = null));
-  const pool = recipes.filter(r => (r.mealTypes || []).includes(slot));
   if (pool.length === 0) return result;
   const toPick = r => ({ recipeId: r.id, name: r.name });
 
@@ -298,9 +300,29 @@ const generateSlotPlan = (recipes, slot) => {
   return result;
 };
 
-const generateWeekPlan = (recipes, slots) => {
+// Assignment for one slot. opts.avoidIds = recipe ids to steer away from (e.g.
+// last week's picks); opts.prevKey = previous roll's signature to avoid an
+// identical re-roll.
+const generateSlotPlan = (recipes, slot, opts = {}) => {
+  const { avoidIds, prevKey } = opts;
+  const base = recipes.filter(r => (r.mealTypes || []).includes(slot));
+  // Prefer recipes not used last week, but only if that still leaves enough to
+  // fill the week with within-week variety (weekend distinct from weekday).
+  let pool = base;
+  if (avoidIds && avoidIds.size) {
+    const fresh = base.filter(r => !avoidIds.has(r.id));
+    if (fresh.length >= 2) pool = fresh;
+  }
+  let plan = afBuildSlotPlan(pool, slot);
+  // Retry to avoid producing the exact same day-by-day result as the last roll.
+  for (let i = 0; i < 12 && prevKey && afPlanKey(plan) === prevKey; i++) plan = afBuildSlotPlan(pool, slot);
+  return plan;
+};
+
+const generateWeekPlan = (recipes, slots, opts = {}) => {
+  const { avoidIdsBySlot } = opts;
   const plan = {};
-  slots.forEach(slot => (plan[slot] = generateSlotPlan(recipes, slot)));
+  slots.forEach(slot => (plan[slot] = generateSlotPlan(recipes, slot, { avoidIds: avoidIdsBySlot?.[slot] })));
   return plan;
 };
 
@@ -354,6 +376,7 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
   const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
   const [nextWeekMeals, setNextWeekMeals] = useState(initialWeek());
+  const [prevWeekMeals, setPrevWeekMeals] = useState(initialWeek());
   const [customTags, setCustomTags] = useState(() => ({
     mealtypes: loadCustomTags("mealtypes"),
     diets: loadCustomTags("diets"),
@@ -408,6 +431,7 @@ export default function App() {
     hasLoadedRef.current = false;
     setWeek(initialWeek());
     setNextWeekMeals(initialWeek());
+    setPrevWeekMeals(initialWeek());
     setSnacks([]);
     setDesserts([]);
     loadAll();
@@ -517,9 +541,11 @@ export default function App() {
       const ws = viewedWeekStartRef.current;
 
       const nextWs = addWeeks(ws, 1);
-      const [mealsRows, nextMealsRows, recipeRows, extrasRows] = await Promise.all([
+      const prevWs = addWeeks(ws, -1);
+      const [mealsRows, nextMealsRows, prevMealsRows, recipeRows, extrasRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
         sb.get("meals", `?week_start=eq.${nextWs}`),
+        sb.get("meals", `?week_start=eq.${prevWs}`),
         sb.get("recipes", "?order=created_at.asc"),
         sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
       ]);
@@ -535,6 +561,7 @@ export default function App() {
       };
       setWeek(parseWeekRows(mealsRows));
       setNextWeekMeals(parseWeekRows(nextMealsRows));
+      setPrevWeekMeals(parseWeekRows(prevMealsRows));
 
       setRecipes(recipeRows.map(r => ({
         id: r.id, name: r.name, description: r.description || "",
@@ -633,7 +660,7 @@ export default function App() {
             desserts={desserts} setDesserts={setDesserts}
             syncStatus={syncStatus}
             viewedWeekStart={viewedWeekStart}
-            nextWeekMeals={nextWeekMeals}
+            nextWeekMeals={nextWeekMeals} prevWeekMeals={prevWeekMeals}
             weatherData={weatherData}
             onPrevWeek={() => setViewedWeekStart(ws => addWeeks(ws, -1))}
             onNextWeek={() => setViewedWeekStart(ws => addWeeks(ws, 1))}
@@ -687,7 +714,7 @@ function ThawItemRow({ item }) {
 // ─── Planner View ─────────────────────────────────────────────────────────────
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, weatherData, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
+function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, prevWeekMeals, weatherData, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
   const [modal, setModal] = useState(null);
   const [inputVal, setInputVal] = useState("");
   const [thawOn, setThawOn] = useState(false);
@@ -773,12 +800,22 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 
   // ─── Auto-Fill ───────────────────────────────────────────────────────────────
   const afEligibleSlots = MEAL_SLOTS.filter(slot => recipes.some(r => (r.mealTypes || []).includes(slot)));
+  // Recipe ids used in the previous week, per slot — steered away from for variety.
+  const afBuildAvoid = () => {
+    const map = {};
+    MEAL_SLOTS.forEach(slot => {
+      const ids = new Set();
+      DAYS.forEach(d => { const rid = prevWeekMeals?.[d]?.[slot]?.recipeId; if (rid) ids.add(rid); });
+      map[slot] = ids;
+    });
+    return map;
+  };
   const openAutoFill = () => {
     const init = new Set(afEligibleSlots);
     setAfSlots(init);
     setAfMode("empty");
     setAfConfirm(false);
-    setAfPlan(generateWeekPlan(recipes, [...init]));
+    setAfPlan(generateWeekPlan(recipes, [...init], { avoidIdsBySlot: afBuildAvoid() }));
     setAfOpen(true);
     history.pushState({ overlay: "autofill" }, "");
   };
@@ -792,12 +829,24 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     });
     setAfPlan(prev => {
       const np = { ...(prev || {}) };
-      if (np[slot]) delete np[slot]; else np[slot] = generateSlotPlan(recipes, slot);
+      if (np[slot]) delete np[slot]; else np[slot] = generateSlotPlan(recipes, slot, { avoidIds: afBuildAvoid()[slot] });
       return np;
     });
   };
-  const afRerollSlot = (slot) => { setAfConfirm(false); setAfPlan(prev => ({ ...prev, [slot]: generateSlotPlan(recipes, slot) })); };
-  const afShuffleAll = () => { setAfConfirm(false); setAfPlan(generateWeekPlan(recipes, [...afSlots])); };
+  const afRerollSlot = (slot) => {
+    setAfConfirm(false);
+    const avoid = afBuildAvoid()[slot];
+    setAfPlan(prev => ({ ...prev, [slot]: generateSlotPlan(recipes, slot, { avoidIds: avoid, prevKey: afPlanKey(prev?.[slot]) }) }));
+  };
+  const afShuffleAll = () => {
+    setAfConfirm(false);
+    const avoid = afBuildAvoid();
+    setAfPlan(prev => {
+      const np = {};
+      [...afSlots].forEach(slot => { np[slot] = generateSlotPlan(recipes, slot, { avoidIds: avoid[slot], prevKey: afPlanKey(prev?.[slot]) }); });
+      return np;
+    });
+  };
   const afSetMode = (m) => { setAfMode(m); setAfConfirm(false); };
 
   // Resolve the final value for a cell given the chosen mode (kept existing vs picked).

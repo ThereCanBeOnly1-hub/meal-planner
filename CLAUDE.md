@@ -22,7 +22,7 @@
 - `visibilitychange` throttled to once per 5s via `lastVisibilityLoadRef`
 - `loadAll` bails early if `isLoadingRef.current` is true (concurrent load guard)
 - `viewedWeekStart` drives which week is loaded; `viewedWeekStartRef` keeps it current for async callbacks
-- `nextWeekMeals` loaded alongside current week to compute cross-week thaw reminders
+- `nextWeekMeals` loaded alongside current week to compute cross-week thaw reminders; `prevWeekMeals` (week before viewed) loaded too, used by Auto-Fill to avoid repeating last week's recipes
 - `weatherData` fetched from Open-Meteo (no API key); location stored in localStorage as `mealplanner_loc`
 - `customTags` stored in Supabase app_settings table AND localStorage fallback
 - `history.pushState` used for all navigation (tab changes, modals, panels, confirms) so Android back button works
@@ -35,7 +35,8 @@
 
 ## Auto-Fill
 
-- Module-level engine: `generateSlotPlan(recipes, slot)` and `generateWeekPlan(recipes, slots)` (pure). Per slot, picks a weekday segment (Mon–Fri: 1 recipe, or random 1–2 for Dinner) laid out as **consecutive blocks** (`afLayBlocks`) to match meal-prep, plus a single weekend recipe (Sat–Sun) distinct from the weekday picks when possible (repeats allowed as fallback). Only recipes tagged for that slot are eligible.
+- Module-level engine: `generateSlotPlan(recipes, slot, opts)` and `generateWeekPlan(recipes, slots, opts)` (pure). Per slot, picks a weekday segment (Mon–Fri: 1 recipe, or random 1–2 for Dinner) laid out as **consecutive blocks** (`afLayBlocks`) to match meal-prep, plus a single weekend recipe (Sat–Sun) distinct from the weekday picks when possible (repeats allowed as fallback). Only recipes tagged for that slot are eligible.
+- Variety: `opts.avoidIds` (last week's recipe ids per slot, from `prevWeekMeals` via `afBuildAvoid`) steers picks away from last week's recipes, but only if that leaves ≥2 usable recipes so within-week variety wins. `opts.prevKey` + `afPlanKey` make a re-roll retry until it differs day-by-day from the previous roll (swapped days count as different; identical pool of 1 can't change).
 - `✨ Auto-Fill` button in the planner header opens a preview panel (overlay history pattern, `{overlay:"autofill"}`). Options: which slots to fill, and mode = "keep existing, fill gaps" vs "replace whole week".
 - Preview groups consecutive same-meal days into segments (`afSegments`); per-slot 🔄 re-roll regenerates just that slot, 🔀 shuffles all. Apply writes into week state (same sync path as manual edits), setting `recipeId` directly so meals link to recipes. Replace mode shows an overwrite confirm counting affected meals; empty mode never touches existing meals.
 - **ThawItemRow**: shared component for thaw reminder rows
