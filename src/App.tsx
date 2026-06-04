@@ -537,6 +537,7 @@ export default function App() {
   };
 
   const saveRecipe = async (recipe) => {
+    recipe = { ...recipe, name: recipe.name.trim() };
     setRecipes(prev => {
       const exists = prev.find(r => r.id === recipe.id);
       return exists ? prev.map(r => r.id === recipe.id ? recipe : r) : [...prev, recipe];
@@ -686,7 +687,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
 
   const saveMeal = (val) => {
     if (!modal) return;
-    const matchedRecipe = val ? recipes.find(r => r.name.toLowerCase() === val.trim().toLowerCase()) : null;
+    const matchedRecipe = val ? recipes.find(r => r.name.trim().toLowerCase() === val.trim().toLowerCase()) : null;
     const entry = { meal: val, thaw: val ? thawOn : false, thawDays, recipeId: matchedRecipe ? matchedRecipe.id : null };
     setWeek(prev => {
       const next = { ...prev, [modal.day]: { ...prev[modal.day], [modal.slot]: entry } };
@@ -1020,7 +1021,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
             {(() => {
               const slotEntry = modal ? week[modal.day][modal.slot] : null;
               const byId = slotEntry?.recipeId ? recipes.find(r => r.id === slotEntry.recipeId) : null;
-              const byName = inputVal.trim() ? recipes.find(r => r.name.toLowerCase() === inputVal.trim().toLowerCase()) : null;
+              const byName = inputVal.trim() ? recipes.find(r => r.name.trim().toLowerCase() === inputVal.trim().toLowerCase()) : null;
               const linked = byId || byName;
               if (!linked) return null;
               return (
