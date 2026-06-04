@@ -31,7 +31,13 @@
 ## Key components
 
 - **App**: top-level state, data fetching, sync
-- **PlannerView**: week grid, header with week nav + weather, thaw banners, meal modal, extras panel
+- **PlannerView**: week grid, header with week nav + weather, thaw banners, meal modal, extras panel, Auto-Fill panel
+
+## Auto-Fill
+
+- Module-level engine: `generateSlotPlan(recipes, slot)` and `generateWeekPlan(recipes, slots)` (pure). Per slot, picks a weekday segment (Mon–Fri: 1 recipe, or random 1–2 for Dinner) laid out as **consecutive blocks** (`afLayBlocks`) to match meal-prep, plus a single weekend recipe (Sat–Sun) distinct from the weekday picks when possible (repeats allowed as fallback). Only recipes tagged for that slot are eligible.
+- `✨ Auto-Fill` button in the planner header opens a preview panel (overlay history pattern, `{overlay:"autofill"}`). Options: which slots to fill, and mode = "keep existing, fill gaps" vs "replace whole week".
+- Preview groups consecutive same-meal days into segments (`afSegments`); per-slot 🔄 re-roll regenerates just that slot, 🔀 shuffles all. Apply writes into week state (same sync path as manual edits), setting `recipeId` directly so meals link to recipes. Replace mode shows an overwrite confirm counting affected meals; empty mode never touches existing meals.
 - **ThawItemRow**: shared component for thaw reminder rows
 - **RecipesView**: router between RecipeGrid / RecipeDetail / RecipeEditor
 - **TagPicker**: reusable tag selector used in RecipeEditor, supports custom tags via props; "Manage" toggle reveals an ✕ on custom chips to delete them (built-in tags can't be deleted). Deleting calls `deleteCustomTag`, which removes the tag from the vocab AND strips it from every recipe using it (via `recipeToRow` bulk upsert), so no recipe is left referencing a removed tag.

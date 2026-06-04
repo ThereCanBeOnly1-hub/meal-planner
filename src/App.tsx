@@ -246,6 +246,64 @@ const recipeToRow = (r) => ({
 // Custom-tag category key -> recipe field holding that tag list.
 const TAG_TYPE_FIELD = { mealtypes: "mealTypes", diets: "dietTags", cuisines: "cuisineTags" };
 
+// ─── Auto-Fill engine ─────────────────────────────────────────────────────────
+const AF_WEEKDAYS = DAYS.slice(0, 5); // Mon–Fri
+const AF_WEEKEND = DAYS.slice(5);     // Sat, Sun
+
+// Random sample of n items from arr (Fisher–Yates partial shuffle).
+const afSample = (arr, n) => {
+  const pool = [...arr];
+  for (let i = pool.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [pool[i], pool[j]] = [pool[j], pool[i]];
+  }
+  return pool.slice(0, n);
+};
+
+// Lay picks across `days` as consecutive blocks (roughly even) — mirrors how a
+// meal-prepped batch is eaten on consecutive days rather than alternating.
+const afLayBlocks = (days, picks) => {
+  const out = {};
+  const k = picks.length;
+  if (k === 0) { days.forEach(d => (out[d] = null)); return out; }
+  if (k === 1) { days.forEach(d => (out[d] = picks[0])); return out; }
+  const base = Math.floor(days.length / k);
+  const rem = days.length - base * k;
+  const sizes = Array.from({ length: k }, () => base);
+  afSample(Array.from({ length: k }, (_, i) => i), rem).forEach(idx => sizes[idx]++); // scatter remainder
+  let di = 0;
+  picks.forEach((p, ci) => { for (let s = 0; s < sizes[ci]; s++) out[days[di++]] = p; });
+  return out;
+};
+
+// Assignment for one slot: { [day]: {recipeId, name} | null }.
+const generateSlotPlan = (recipes, slot) => {
+  const result = {};
+  DAYS.forEach(d => (result[d] = null));
+  const pool = recipes.filter(r => (r.mealTypes || []).includes(slot));
+  if (pool.length === 0) return result;
+  const toPick = r => ({ recipeId: r.id, name: r.name });
+
+  // Weekday segment (Mon–Fri): 1 recipe, or 1–2 for dinner, as consecutive blocks.
+  const weekdayCount = slot === "Dinner" ? (Math.random() < 0.5 ? 1 : 2) : 1;
+  const weekdayPicks = afSample(pool, Math.min(weekdayCount, pool.length)).map(toPick);
+  Object.assign(result, afLayBlocks(AF_WEEKDAYS, weekdayPicks));
+
+  // Weekend segment (Sat–Sun): one recipe for both days, distinct from weekday
+  // picks when possible, otherwise allow a repeat so the week still fills.
+  const usedIds = new Set(weekdayPicks.map(p => p.recipeId));
+  const remaining = pool.filter(r => !usedIds.has(r.id));
+  const weekendPick = toPick(afSample(remaining.length ? remaining : pool, 1)[0]);
+  AF_WEEKEND.forEach(d => (result[d] = weekendPick));
+  return result;
+};
+
+const generateWeekPlan = (recipes, slots) => {
+  const plan = {};
+  slots.forEach(slot => (plan[slot] = generateSlotPlan(recipes, slot)));
+  return plan;
+};
+
 // ─── Supabase Config ─────────────────────────────────────────────────────────
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY ?? "";
@@ -644,6 +702,11 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const [dessertSugOpen, setDessertSugOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [afOpen, setAfOpen] = useState(false);
+  const [afMode, setAfMode] = useState("empty"); // "empty" | "replace"
+  const [afSlots, setAfSlots] = useState(() => new Set());
+  const [afPlan, setAfPlan] = useState(null);
+  const [afConfirm, setAfConfirm] = useState(false);
   const [monthPickerOpen, setMonthPickerOpen] = useState(false);
   const [pickerYear, setPickerYear] = useState(() => new Date(viewedWeekStart + "T00:00:00").getFullYear());
   const [pickerMonth, setPickerMonth] = useState(() => new Date(viewedWeekStart + "T00:00:00").getMonth());
@@ -666,12 +729,13 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       isRestoringRef.current = true;
       if (modal) { setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false); }
       else if (showClearConfirm) { setShowClearConfirm(false); }
+      else if (afOpen) { setAfOpen(false); setAfConfirm(false); }
       else if (panelOpen) { setPanelOpen(false); }
       isRestoringRef.current = false;
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [modal, showClearConfirm, panelOpen]);
+  }, [modal, showClearConfirm, panelOpen, afOpen]);
 
   const openModal = (day, slot) => {
     const cur = week[day][slot];
@@ -706,6 +770,77 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   };
 
   const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); history.back(); };
+
+  // ─── Auto-Fill ───────────────────────────────────────────────────────────────
+  const afEligibleSlots = MEAL_SLOTS.filter(slot => recipes.some(r => (r.mealTypes || []).includes(slot)));
+  const openAutoFill = () => {
+    const init = new Set(afEligibleSlots);
+    setAfSlots(init);
+    setAfMode("empty");
+    setAfConfirm(false);
+    setAfPlan(generateWeekPlan(recipes, [...init]));
+    setAfOpen(true);
+    history.pushState({ overlay: "autofill" }, "");
+  };
+  const closeAutoFill = () => { setAfOpen(false); setAfConfirm(false); if (!isRestoringRef.current) history.back(); };
+  const afToggleSlot = (slot) => {
+    setAfConfirm(false);
+    setAfSlots(prev => {
+      const n = new Set(prev);
+      n.has(slot) ? n.delete(slot) : n.add(slot);
+      return n;
+    });
+    setAfPlan(prev => {
+      const np = { ...(prev || {}) };
+      if (np[slot]) delete np[slot]; else np[slot] = generateSlotPlan(recipes, slot);
+      return np;
+    });
+  };
+  const afRerollSlot = (slot) => { setAfConfirm(false); setAfPlan(prev => ({ ...prev, [slot]: generateSlotPlan(recipes, slot) })); };
+  const afShuffleAll = () => { setAfConfirm(false); setAfPlan(generateWeekPlan(recipes, [...afSlots])); };
+  const afSetMode = (m) => { setAfMode(m); setAfConfirm(false); };
+
+  // Resolve the final value for a cell given the chosen mode (kept existing vs picked).
+  const afResolveCell = (slot, day) => {
+    const existing = week[day][slot];
+    if (afMode === "empty" && existing.meal) return { name: existing.meal, recipeId: existing.recipeId, kept: true };
+    const pick = afPlan?.[slot]?.[day];
+    if (pick) return { name: pick.name, recipeId: pick.recipeId, kept: false };
+    if (existing.meal) return { name: existing.meal, recipeId: existing.recipeId, kept: true };
+    return null;
+  };
+  // Group consecutive days with the same resolved meal into segments for the preview.
+  const afSegments = (slot) => {
+    const segs = [];
+    DAYS.forEach(day => {
+      const cell = afResolveCell(slot, day);
+      const key = cell ? `${cell.recipeId || cell.name}|${cell.kept}` : "__none";
+      const last = segs[segs.length - 1];
+      if (last && last.key === key) last.days.push(day);
+      else segs.push({ key, days: [day], cell });
+    });
+    return segs;
+  };
+  const afOverwriteCount = afMode === "replace"
+    ? [...afSlots].reduce((acc, slot) => acc + DAYS.filter(d => week[d][slot].meal && afPlan?.[slot]?.[d]).length, 0)
+    : 0;
+  const afApply = () => {
+    if (afMode === "replace" && afOverwriteCount > 0 && !afConfirm) { setAfConfirm(true); return; }
+    setWeek(prev => {
+      const next = {};
+      DAYS.forEach(day => { next[day] = { ...prev[day] }; });
+      [...afSlots].forEach(slot => {
+        DAYS.forEach(day => {
+          if (afMode === "empty" && prev[day][slot].meal) return;
+          const pick = afPlan?.[slot]?.[day];
+          if (!pick) return;
+          next[day][slot] = { meal: pick.name, thaw: false, thawDays: 2, recipeId: pick.recipeId };
+        });
+      });
+      return next;
+    });
+    closeAutoFill();
+  };
 
   const toggleCopyDay = (di) => setCopyDays(prev => prev.includes(di)?prev.filter(x=>x!==di):[...prev,di]);
 
@@ -772,10 +907,16 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                 {syncStatus==="loading"||syncStatus==="syncing" ? "🔄 Syncing…" : syncStatus==="synced" ? "✓ Synced" : "⚠ Sync error"}
               </div>
             ) : <div />}
-            <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => { setShowClearConfirm(true); history.pushState({ overlay: "clearConfirm" }, ""); }} title="Clear week">
-              <span style={{fontSize:14}}>🗑</span>
-              <span style={s.clearWeekLabel}>Clear</span>
-            </button>
+            <div style={s.headerTopBtns}>
+              <button style={s.autoFillBtn} className="autofill-btn" onClick={openAutoFill} title="Auto-fill this week">
+                <span style={{fontSize:13}}>✨</span>
+                <span style={s.clearWeekLabel}>Auto-Fill</span>
+              </button>
+              <button style={s.clearWeekBtn} className="clear-week-btn" onClick={() => { setShowClearConfirm(true); history.pushState({ overlay: "clearConfirm" }, ""); }} title="Clear week">
+                <span style={{fontSize:14}}>🗑</span>
+                <span style={s.clearWeekLabel}>Clear</span>
+              </button>
+            </div>
           </div>
           {/* Centered title */}
           <div style={s.headerTitleBlock}>
@@ -987,6 +1128,98 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       </aside>
 
       {/* CLEAR WEEK CONFIRM */}
+      {/* AUTO-FILL PANEL */}
+      {afOpen && (
+        <div style={s.overlay} onClick={closeAutoFill}>
+          <div style={s.modal} onClick={e=>e.stopPropagation()} className="modal-in">
+            <div style={s.modalHead}>
+              <div>
+                <div style={s.modalEyebrow}>✨ Auto-Fill</div>
+                <div style={s.modalTitle}>Plan {getWeekRange(viewedWeekStart)}</div>
+              </div>
+              <button style={s.modalClose} onClick={closeAutoFill}>✕</button>
+            </div>
+
+            {afEligibleSlots.length === 0 ? (
+              <div style={{textAlign:"center",padding:"20px 4px"}}>
+                <div style={{fontSize:30,marginBottom:10}}>🍽</div>
+                <div style={{fontSize:14,color:"#c8a878",fontFamily:"'DM Sans',sans-serif",marginBottom:6,fontWeight:600}}>No recipes to pull from yet</div>
+                <div style={{fontSize:12.5,color:"#9a7f60",fontFamily:"'DM Sans',sans-serif",lineHeight:1.5}}>Add some recipes and tag them with a meal type (Breakfast / Lunch / Dinner), then Auto-Fill can build your week.</div>
+              </div>
+            ) : (
+              <>
+                {/* Slot toggles */}
+                <div style={s.afOptLabel}>Fill which meals?</div>
+                <div style={s.afSlotRow}>
+                  {afEligibleSlots.map(slot => {
+                    const on = afSlots.has(slot);
+                    return (
+                      <button key={slot} style={{...s.afSlotChip,...(on?{...s.afSlotChipOn,borderColor:slotColors[slot],color:slotColors[slot]}:{})}} onClick={()=>afToggleSlot(slot)}>
+                        <span style={{...s.dot,background:slotColors[slot],marginRight:6,opacity:on?1:0.4}} />{slot}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Mode toggle */}
+                <div style={s.afOptLabel}>If the week already has meals…</div>
+                <div style={s.afModeRow}>
+                  <button style={{...s.afModeBtn,...(afMode==="empty"?s.afModeBtnOn:{})}} onClick={()=>afSetMode("empty")}>Keep them, fill the gaps</button>
+                  <button style={{...s.afModeBtn,...(afMode==="replace"?s.afModeBtnOn:{})}} onClick={()=>afSetMode("replace")}>Replace the whole week</button>
+                </div>
+
+                {/* Preview */}
+                <div style={s.afPreviewHead}>
+                  <span style={s.afOptLabel}>Preview</span>
+                  <button style={s.afShuffleBtn} className="af-shuffle-btn" onClick={afShuffleAll}>🔀 Shuffle all</button>
+                </div>
+                {afSlots.size === 0 ? (
+                  <div style={s.afEmptyHint}>Pick at least one meal above.</div>
+                ) : (
+                  <div style={s.afPreview}>
+                    {MEAL_SLOTS.filter(sl=>afSlots.has(sl)).map(slot => (
+                      <div key={slot} style={s.afSlotBlock}>
+                        <div style={s.afSlotBlockHead}>
+                          <span style={s.afSlotBlockTitle}><span style={{...s.dot,background:slotColors[slot],marginRight:6}} />{slot}</span>
+                          <button style={s.afRerollBtn} className="af-shuffle-btn" onClick={()=>afRerollSlot(slot)}>🔄 Re-roll</button>
+                        </div>
+                        {afSegments(slot).map((seg,i) => {
+                          const range = seg.days.length===1 ? seg.days[0].slice(0,3) : `${seg.days[0].slice(0,3)}–${seg.days[seg.days.length-1].slice(0,3)}`;
+                          return (
+                            <div key={i} style={s.afSegRow}>
+                              <span style={s.afSegRange}>{range}</span>
+                              {seg.cell
+                                ? <span style={s.afSegName}>{seg.cell.name}{seg.cell.kept && <span style={s.afKeptTag}>kept</span>}</span>
+                                : <span style={s.afSegEmpty}>— empty</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Confirm / actions */}
+                {afConfirm ? (
+                  <div style={s.afConfirmBar}>
+                    <div style={s.afConfirmText}>This replaces {afOverwriteCount} meal{afOverwriteCount!==1?"s":""} already on the week.</div>
+                    <div style={s.afActions}>
+                      <button style={s.btnClear} onClick={()=>setAfConfirm(false)}>Cancel</button>
+                      <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={afApply}>Replace & Apply</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={s.afActions}>
+                    <button style={s.btnClear} onClick={closeAutoFill}>Cancel</button>
+                    <button style={{...s.btnSave,...(afSlots.size===0?s.btnDisabled:{})}} onClick={()=>afSlots.size>0&&afApply()}>Apply to week</button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {showClearConfirm && (
         <div style={s.overlay} onClick={()=>{ setShowClearConfirm(false); history.back(); }}>
           <div style={{...s.modal,maxWidth:320,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
@@ -1743,6 +1976,32 @@ const s = {
   counterFill: { height:"100%", borderRadius:2, transition:"width 0.35s ease" },
   clearWeekBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:5, transition:"border-color 0.2s,background 0.2s" },
   clearWeekLabel: { fontSize:10, color:"#9a7f60", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
+  headerTopBtns: { display:"flex", alignItems:"center", gap:8 },
+  autoFillBtn: { background:"#2e2418", border:"1px solid #4a3c2a", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:5, transition:"border-color 0.2s,background 0.2s" },
+
+  afOptLabel: { fontSize:11, color:"#7a6448", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", marginBottom:8, marginTop:14 },
+  afSlotRow: { display:"flex", flexWrap:"wrap", gap:7 },
+  afSlotChip: { display:"flex", alignItems:"center", background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:20, padding:"7px 13px", fontSize:13, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  afSlotChipOn: { background:"#241e16" },
+  afModeRow: { display:"flex", gap:7 },
+  afModeBtn: { flex:1, background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:10, padding:"9px 8px", fontSize:12.5, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, lineHeight:1.25 },
+  afModeBtnOn: { background:"#2e2418", borderColor:"#c8a878", color:"#f4c97a" },
+  afPreviewHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginTop:16, marginBottom:8 },
+  afShuffleBtn: { background:"#241e16", border:"1px solid #4a3c2a", borderRadius:8, padding:"5px 11px", fontSize:12, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  afEmptyHint: { fontSize:12.5, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", padding:"10px 0", textAlign:"center" },
+  afPreview: { display:"flex", flexDirection:"column", gap:10 },
+  afSlotBlock: { background:"#1c1712", border:"1px solid #2a2018", borderRadius:11, padding:"11px 12px" },
+  afSlotBlockHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 },
+  afSlotBlockTitle: { display:"flex", alignItems:"center", fontSize:13, fontWeight:700, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif" },
+  afRerollBtn: { background:"none", border:"1px solid #3a2e22", borderRadius:7, padding:"4px 9px", fontSize:11.5, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  afSegRow: { display:"flex", alignItems:"baseline", gap:10, padding:"3px 0" },
+  afSegRange: { fontSize:11, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", fontWeight:700, width:62, flexShrink:0, letterSpacing:"0.03em" },
+  afSegName: { fontSize:13.5, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", display:"flex", alignItems:"center", gap:7 },
+  afSegEmpty: { fontSize:13, color:"#5a4a38", fontFamily:"'DM Sans',sans-serif", fontStyle:"italic" },
+  afKeptTag: { fontSize:9, color:"#7ecfcf", background:"#1c2a28", border:"1px solid #2a4a44", borderRadius:5, padding:"1px 5px", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", fontWeight:700 },
+  afActions: { display:"flex", gap:10, justifyContent:"flex-end", marginTop:18 },
+  afConfirmBar: { marginTop:18, background:"#2a1818", border:"1px solid #5a2e28", borderRadius:11, padding:"12px" },
+  afConfirmText: { fontSize:12.5, color:"#f0a890", fontFamily:"'DM Sans',sans-serif", marginBottom:10, textAlign:"center" },
   extrasBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"5px 10px", cursor:"pointer", display:"flex", alignItems:"center", gap:6, position:"relative", transition:"border-color 0.2s,background 0.2s" },
   extrasBtnIcon: { fontSize:16, lineHeight:1 },
   extrasBtnLabel: { fontSize:10, color:"#9a7f60", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
@@ -2034,6 +2293,8 @@ const css = `
   .bin-item:hover .bin-remove { opacity: 1 !important; }
   .bin-add-btn:hover { background: #4a3c2a !important; }
   .extras-btn:hover, .clear-week-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
+  .autofill-btn:hover { border-color: #c8a878 !important; background: #3a2e1c !important; }
+  .af-shuffle-btn:hover { border-color: #c8a878 !important; color: #f4c97a !important; }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
   .day-chip:hover { background: #2e2418 !important; border-color: #9a7f60 !important; color: #f4e4c4 !important; }
   .day-chip.day-chip-sel, .day-chip.day-chip-sel:hover { background: #3d3020 !important; border-color: #c8a878 !important; color: #f4e4c4 !important; }
