@@ -498,6 +498,7 @@ export default function App() {
   const [prevWeekMeals, setPrevWeekMeals] = useState(initialWeek());
   const [lists, setLists] = useState([]);
   const [listView, setListView] = useState(null); // open list id or null
+  const pendingListRef = useRef(new Map()); // in-flight list/item writes, kept so a poll can't clobber optimistic edits
   const [groceryOpen, setGroceryOpen] = useState(false);
   const groceryPopRef = useRef(false);
   const [ingredientCats, setIngredientCats] = useState({});
@@ -738,6 +739,28 @@ export default function App() {
         builtLists = [grocery, ...builtLists];
         sb.upsert("lists", [listToRow(grocery)], "id").catch(e => console.error("Grocery init:", e));
       }
+      // Re-apply any in-flight local writes so a poll mid-write doesn't make a
+      // just-added/just-toggled item flicker out until it's confirmed server-side.
+      const pending = pendingListRef.current;
+      if (pending.size) {
+        pending.forEach((p, id) => {
+          if (p.kind !== "list") return;
+          if (p.deleted) builtLists = builtLists.filter(l => l.id !== id);
+          else if (!builtLists.some(l => l.id === id)) builtLists.push({ ...p.listObj, items: p.listObj.items || [] });
+          else builtLists = builtLists.map(l => l.id === id ? { ...l, name: p.listObj.name, icon: p.listObj.icon, position: p.listObj.position } : l);
+        });
+        builtLists = builtLists.map(l => {
+          let items = l.items, changed = false;
+          pending.forEach((p, id) => {
+            if (p.kind !== "item" || p.listId !== l.id) return;
+            if (p.deleted) { if (items.some(it => it.id === id)) { items = items.filter(it => it.id !== id); changed = true; } }
+            else if (!items.some(it => it.id === id)) { items = [...items, p.item]; changed = true; }
+            else { items = items.map(it => it.id === id ? p.item : it); changed = true; }
+          });
+          return changed ? { ...l, items } : l;
+        });
+      }
+
       // Grocery always pinned first, then by position/creation order.
       builtLists.sort((a, b) => (a.type === "grocery" ? -1 : b.type === "grocery" ? 1 : (a.position ?? 0) - (b.position ?? 0)));
       setLists(builtLists);
@@ -823,25 +846,39 @@ export default function App() {
   const closeGrocery = () => { setGroceryOpen(false); if (!groceryPopRef.current) history.back(); };
 
   // ─── List operations (optimistic state + per-row sync) ───────────────────────
-  const syncWrite = (label, p) => { if (isConfigured) p.then(() => setSyncStatus("synced")).catch(e => { console.error(label, e); setSyncStatus("error"); }); };
+  // Record an in-flight write so a background poll can't overwrite it (see loadAll
+  // reconcile). Entries linger briefly after the write settles to cover a poll
+  // that started mid-write.
+  const trackPending = (id, desc) => pendingListRef.current.set(id, desc);
+  const syncWrite = (label, p, settleIds) => {
+    const clear = () => settleIds && settleIds.forEach(id => pendingListRef.current.delete(id));
+    if (!isConfigured) { clear(); return; }
+    p.then(() => setSyncStatus("synced"))
+      .catch(e => { console.error(label, e); setSyncStatus("error"); })
+      .finally(() => { if (settleIds) setTimeout(clear, 2500); });
+  };
 
   const addList = (name, icon) => {
     const pos = lists.reduce((m, l) => Math.max(m, l.position || 0), 0) + 1;
     const list = { id: genId(), name: name.trim() || "Untitled List", type: "custom", icon: icon || "📝", position: pos, items: [] };
     setLists(prev => [...prev, list]);
-    syncWrite("Add list:", sb.upsert("lists", [listToRow(list)], "id"));
+    trackPending(list.id, { kind: "list", listObj: list });
+    syncWrite("Add list:", sb.upsert("lists", [listToRow(list)], "id"), [list.id]);
     return list.id;
   };
   const updateList = (id, fields) => {
-    let updated = null;
-    setLists(prev => prev.map(l => { if (l.id !== id) return l; updated = { ...l, ...fields }; return updated; }));
-    if (updated) syncWrite("Update list:", sb.upsert("lists", [listToRow(updated)], "id"));
+    const cur = lists.find(l => l.id === id); if (!cur) return;
+    const updated = { ...cur, ...fields };
+    setLists(prev => prev.map(l => l.id === id ? updated : l));
+    trackPending(id, { kind: "list", listObj: updated });
+    syncWrite("Update list:", sb.upsert("lists", [listToRow(updated)], "id"), [id]);
   };
   const deleteList = (id) => {
     if (id === GROCERY_ID) return; // grocery can't be deleted
     setLists(prev => prev.filter(l => l.id !== id));
     if (listView === id) navigate("lists", null);
-    syncWrite("Delete list:", sb.del("lists", `id=eq.${id}`)); // cascade removes items
+    trackPending(id, { kind: "list", deleted: true });
+    syncWrite("Delete list:", sb.del("lists", `id=eq.${id}`), [id]); // cascade removes items
   };
   const addListItem = (listId, text) => {
     const t = text.trim(); if (!t) return;
@@ -849,21 +886,28 @@ export default function App() {
     const pos = (list ? list.items.reduce((m, i) => Math.max(m, i.position || 0), 0) : 0) + 1;
     const item = { id: genId(), text: t, checked: false, position: pos, category: "", measures: [], sources: [] };
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
-    syncWrite("Add item:", sb.upsert("list_items", [listItemToRow(item, listId)], "id"));
+    trackPending(item.id, { kind: "item", listId, item });
+    syncWrite("Add item:", sb.upsert("list_items", [listItemToRow(item, listId)], "id"), [item.id]);
   };
   const toggleListItem = (listId, itemId) => {
-    let toggled = null;
-    setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(it => { if (it.id !== itemId) return it; toggled = { ...it, checked: !it.checked }; return toggled; }) }));
-    if (toggled) syncWrite("Toggle item:", sb.upsert("list_items", [listItemToRow(toggled, listId)], "id"));
+    const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
+    const toggled = { ...it, checked: !it.checked };
+    setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(x => x.id === itemId ? toggled : x) }));
+    trackPending(itemId, { kind: "item", listId, item: toggled });
+    syncWrite("Toggle item:", sb.upsert("list_items", [listItemToRow(toggled, listId)], "id"), [itemId]);
   };
   const deleteListItem = (listId, itemId) => {
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: l.items.filter(it => it.id !== itemId) } : l));
-    syncWrite("Delete item:", sb.del("list_items", `id=eq.${itemId}`));
+    trackPending(itemId, { kind: "item", listId, deleted: true });
+    syncWrite("Delete item:", sb.del("list_items", `id=eq.${itemId}`), [itemId]);
   };
   const clearListItems = (listId, onlyChecked) => {
+    const list = lists.find(l => l.id === listId);
+    const removed = list ? (onlyChecked ? list.items.filter(it => it.checked) : list.items).map(it => it.id) : [];
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: onlyChecked ? l.items.filter(it => !it.checked) : [] } : l));
+    removed.forEach(id => trackPending(id, { kind: "item", listId, deleted: true }));
     const q = onlyChecked ? `list_id=eq.${listId}&checked=eq.true` : `list_id=eq.${listId}`;
-    syncWrite("Clear items:", sb.del("list_items", q));
+    syncWrite("Clear items:", sb.del("list_items", q), removed);
   };
 
   // Add one or more recipes' ingredients to the grocery list. Recipe-sourced
@@ -887,6 +931,7 @@ export default function App() {
 
     let added = 0, merged = 0;
     const rows = [];
+    const changedIds = [];
     const items = grocery.items.map(it => ({ ...it, measures: [...(it.measures || [])], sources: [...(it.sources || [])] }));
     let maxPos = items.reduce((mx, i) => Math.max(mx, i.position || 0), 0);
     const newItems = [];
@@ -896,17 +941,21 @@ export default function App() {
         existing.measures = mergeMeasures(existing.measures, c.measures);
         c.sources.forEach(s => { if (!existing.sources.some(x => x.id === s.id)) existing.sources.push(s); });
         rows.push(listItemToRow(existing, grocery.id));
+        trackPending(existing.id, { kind: "item", listId: grocery.id, item: existing });
+        changedIds.push(existing.id);
         merged++;
       } else {
         const item = { id: genId(), text: c.text, checked: false, position: ++maxPos, category: "", measures: c.measures, sources: c.sources };
         newItems.push(item);
         rows.push(listItemToRow(item, grocery.id));
+        trackPending(item.id, { kind: "item", listId: grocery.id, item });
+        changedIds.push(item.id);
         added++;
       }
     });
     const finalItems = [...items, ...newItems];
     setLists(prev => prev.map(l => l.id === grocery.id ? { ...l, items: finalItems } : l));
-    if (rows.length) syncWrite("Add to grocery:", sb.upsert("list_items", rows, "id"));
+    if (rows.length) syncWrite("Add to grocery:", sb.upsert("list_items", rows, "id"), changedIds);
     return { added, merged };
   };
   const addRecipeToGrocery = (recipe) => addRecipesToGrocery([recipe]);
