@@ -13,7 +13,6 @@ const CUISINE_TAGS = ["American","Italian","Mexican","Asian","Mediterranean","In
 
 const SNACK_SUGGESTIONS = ["Apple & PB","Cheese & Crackers","Trail Mix","Yogurt","Hummus & Veggies","Granola Bar","Popcorn","String Cheese","Rice Cakes","Fruit Salad"];
 const DESSERT_SUGGESTIONS = ["Ice Cream","Brownies","Cookies","Fruit Sorbet","Pudding","Cheesecake","Apple Pie","Chocolate Mousse","Gelato","Cupcakes"];
-const FALLBACK_SUGGESTIONS = ["Spaghetti Bolognese","Tacos","Grilled Chicken","Stir Fry","Pizza Night","Salmon & Veggies","Burgers","Soup & Bread","Steak Night","Pasta Primavera","Fish Tacos","BBQ Ribs","Chicken Alfredo","Veggie Curry","Breakfast Burritos","Pancakes","French Toast","Omelette","Avocado Toast","Smoothie Bowl","BLT Sandwich","Caesar Salad","Pho","Ramen","Mac & Cheese"];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const initialWeek = () => {
@@ -728,10 +727,9 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
   const addSnack = (v) => { v=v.trim(); if(!v)return; setSnacks(p=>[...p,v]); setSnackInput(""); setSnackSugOpen(false); };
   const addDessert = (v) => { v=v.trim(); if(!v)return; setDesserts(p=>[...p,v]); setDessertInput(""); setDessertSugOpen(false); };
 
-  // Suggestions: recipe library first, then fallbacks
+  // Suggestions come from the recipe library only
   const getSuggestions = (slot, query) => {
-    const libNames = recipesBySlot(slot);
-    const all = [...new Set([...libNames, ...FALLBACK_SUGGESTIONS])];
+    const all = [...new Set(recipesBySlot(slot))];
     if (!query) return all.slice(0, 8);
     return all.filter(m => m.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
   };
@@ -1038,19 +1036,25 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
             })()}
 
             {/* Suggestions */}
-            <div style={s.sugs}>
-              <div style={s.sugsLbl}>{inputVal.length>0?"Suggestions":"Quick picks"}</div>
-              <div style={s.sugsList}>
-                {getSuggestions(modal.slot, inputVal.length>0?inputVal:"").map(m => {
-                  const isFromLib = recipes.some(r=>r.name.toLowerCase()===m.toLowerCase());
-                  return (
-                    <button key={m} style={{...chips.normal,...(isFromLib?chips.recipeChip:{})}} className="chip" onClick={()=>setInputVal(m)}>
-                      {isFromLib && <span style={{marginRight:4,fontSize:10}}>📖</span>}{m}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
+            {(()=>{
+              const sugs = getSuggestions(modal.slot, inputVal.length>0?inputVal:"");
+              if (sugs.length===0) return null;
+              return (
+                <div style={s.sugs}>
+                  <div style={s.sugsLbl}>{inputVal.length>0?"Suggestions":"From your recipes"}</div>
+                  <div style={s.sugsList}>
+                    {sugs.map(m => {
+                      const isFromLib = recipes.some(r=>r.name.toLowerCase()===m.toLowerCase());
+                      return (
+                        <button key={m} style={{...chips.normal,...(isFromLib?chips.recipeChip:{})}} className="chip" onClick={()=>setInputVal(m)}>
+                          {isFromLib && <span style={{marginRight:4,fontSize:10}}>📖</span>}{m}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Thaw */}
             {inputVal.trim() && (
