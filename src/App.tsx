@@ -799,7 +799,7 @@ export default function App() {
         const left = g ? g.items.filter(i => !i.checked).length : 0;
         return (
           <button style={s.groceryFab} className="grocery-fab" onClick={openGrocery} title="Grocery list">
-            <span style={{fontSize:22}}>🛒</span>
+            <span style={{fontSize:16}}>🛒</span>
             {left > 0 && <span style={s.groceryFabBadge}>{left}</span>}
           </button>
         );
@@ -2734,8 +2734,8 @@ const s = {
   listMenuItemDim: { opacity:0.4 },
 
   // Grocery FAB + quick-drawer
-  groceryFab: { position:"fixed", right:16, bottom:72, width:54, height:54, borderRadius:"50%", background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", boxShadow:"0 8px 22px rgba(0,0,0,0.45)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex:48 },
-  groceryFabBadge: { position:"absolute", top:-3, right:-3, background:"#e07a5f", color:"#fff", fontSize:11, fontWeight:800, minWidth:20, height:20, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", padding:"0 5px", fontFamily:"'DM Sans',sans-serif", border:"2px solid #1c1712" },
+  groceryFab: { position:"fixed", right:16, bottom:72, width:38, height:38, borderRadius:"50%", background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", boxShadow:"0 6px 16px rgba(0,0,0,0.4)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex:48 },
+  groceryFabBadge: { position:"absolute", top:-4, right:-4, background:"#e07a5f", color:"#fff", fontSize:9, fontWeight:800, minWidth:16, height:16, borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", padding:"0 4px", fontFamily:"'DM Sans',sans-serif", border:"1.5px solid #1c1712" },
   groceryOverlay: { position:"fixed", inset:0, background:"rgba(12,10,8,0.6)", zIndex:110, display:"flex", justifyContent:"flex-end", backdropFilter:"blur(2px)" },
   groceryDrawer: { width:"min(400px,90vw)", height:"100%", background:"#221a12", borderLeft:"1px solid #3a2e22", boxShadow:"-12px 0 40px rgba(0,0,0,0.5)", display:"flex", flexDirection:"column", padding:"16px", boxSizing:"border-box", animation:"drawerIn 0.22s ease" },
   groceryDrawerHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 },
