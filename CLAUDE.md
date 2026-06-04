@@ -12,6 +12,8 @@
 - **recipes**: id, name, description, url, photo (TEXT), notes (TEXT), prep_time, cook_time, base_servings, meal_types (jsonb), diet_tags (jsonb), cuisine_tags (jsonb DEFAULT '[]'::jsonb), ingredients (jsonb), steps (jsonb), updated_at
 - **extras**: week_start, type (snack|dessert), name
 - **app_settings**: key (TEXT PK), value (jsonb) — stores custom_tags: {mealtypes:[], diets:[], cuisines:[]}
+- **lists**: id (TEXT PK), name, type ('grocery'|'custom'), icon, position, created_at, updated_at
+- **list_items**: id (TEXT PK), list_id (FK→lists, ON DELETE CASCADE), text, checked, position, qty, unit, category, source_recipe_id (last four reserved for Phase 2), created_at, updated_at
 
 ## Architecture notes
 
@@ -27,6 +29,8 @@
 - `customTags` stored in Supabase app_settings table AND localStorage fallback
 - `history.pushState` used for all navigation (tab changes, modals, panels, confirms) so Android back button works
 - App-level popstate handler only responds to states with a `tab` property (ignores overlay states)
+- Tab history state carries `recipeId`/`recipeEdit` (recipes) and `listId` (lists); views resolve the object from state by id so reload/back is robust
+- Lists: normalized (`lists` + `list_items`), loaded in `loadAll`. Item ops (`addListItem`/`toggleListItem`/`deleteListItem`/`clearListItems`) are optimistic + per-row upsert/delete so concurrent co-editing doesn't clobber. Grocery is a singleton with fixed id `GROCERY_ID` ("grocery") — auto-created on load if missing (idempotent across devices), can't be deleted
 
 ## Key components
 
@@ -41,6 +45,7 @@
 - Preview groups consecutive same-meal days into segments (`afSegments`); per-slot 🔄 re-roll regenerates just that slot, 🔀 shuffles all. Apply writes into week state (same sync path as manual edits), setting `recipeId` directly so meals link to recipes. Replace mode shows an overwrite confirm counting affected meals; empty mode never touches existing meals.
 - **ThawItemRow**: shared component for thaw reminder rows
 - **RecipesView**: router between RecipeGrid / RecipeDetail / RecipeEditor
+- **ListsView**: router between ListIndex (grocery pinned + custom list cards + create) and ListDetail (add/check/delete items, clear checked/all, rename/delete list)
 - **TagPicker**: reusable tag selector used in RecipeEditor, supports custom tags via props; "Manage" toggle reveals an ✕ on custom chips to delete them (built-in tags can't be deleted). Deleting calls `deleteCustomTag`, which removes the tag from the vocab AND strips it from every recipe using it (via `recipeToRow` bulk upsert), so no recipe is left referencing a removed tag.
 - **RecipeGrid**: recipe list with collapsed Meal/Diet/Cuisine filter dropdowns; header has Import + New buttons
 - **ImportModal**: "From link" / "From photo" recipe import; calls `/api/import-recipe`, normalizes result via `normalizeImported()`, then opens RecipeEditor pre-filled for review

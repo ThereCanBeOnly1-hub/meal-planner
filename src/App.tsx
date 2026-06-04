@@ -246,6 +246,17 @@ const recipeToRow = (r) => ({
 // Custom-tag category key -> recipe field holding that tag list.
 const TAG_TYPE_FIELD = { mealtypes: "mealTypes", diets: "dietTags", cuisines: "cuisineTags" };
 
+// ─── Lists ────────────────────────────────────────────────────────────────────
+const GROCERY_ID = "grocery"; // fixed id makes the singleton idempotent across devices
+const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const LIST_ICONS = ["📝", "✅", "🧳", "🛠", "🎁", "🏠", "💡", "🛒", "📦", "🌱", "🎉", "✈️"];
+const listToRow = (l) => ({ id: l.id, name: l.name, type: l.type, icon: l.icon, position: l.position ?? 0, updated_at: new Date().toISOString() });
+const listItemToRow = (it, listId) => ({
+  id: it.id, list_id: listId, text: it.text, checked: !!it.checked, position: it.position ?? 0,
+  qty: it.qty ?? null, unit: it.unit ?? null, category: it.category ?? null, source_recipe_id: it.sourceRecipeId ?? null,
+  updated_at: new Date().toISOString(),
+});
+
 // ─── Auto-Fill engine ─────────────────────────────────────────────────────────
 const AF_WEEKDAYS = DAYS.slice(0, 5); // Mon–Fri
 const AF_WEEKEND = DAYS.slice(5);     // Sat, Sun
@@ -377,6 +388,8 @@ export default function App() {
   const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
   const [nextWeekMeals, setNextWeekMeals] = useState(initialWeek());
   const [prevWeekMeals, setPrevWeekMeals] = useState(initialWeek());
+  const [lists, setLists] = useState([]);
+  const [listView, setListView] = useState(null); // open list id or null
   const [customTags, setCustomTags] = useState(() => ({
     mealtypes: loadCustomTags("mealtypes"),
     diets: loadCustomTags("diets"),
@@ -399,9 +412,10 @@ export default function App() {
 
   const navigate = (newTab: string, newView: any) => {
     setTab(newTab);
-    setRecipeView(newView);
+    if (newTab === "lists") setListView(newView?.listId ?? null);
+    else setRecipeView(newView);
     if (!isRestoringRef.current) {
-      history.pushState({ tab: newTab, recipeId: newView?.recipe?.id ?? null, recipeEdit: newView?.edit ?? false }, "");
+      history.pushState({ tab: newTab, recipeId: newView?.recipe?.id ?? null, recipeEdit: newView?.edit ?? false, listId: newView?.listId ?? null }, "");
     }
   };
 
@@ -410,7 +424,7 @@ export default function App() {
     history.replaceState({ tab: "planner", recipeId: null, recipeEdit: false }, "");
     const onPopState = (e: PopStateEvent) => {
       if (!e.state || !e.state.tab) return;
-      const { tab: t, recipeId, recipeEdit } = e.state;
+      const { tab: t, recipeId, recipeEdit, listId } = e.state;
       isRestoringRef.current = true;
       setTab(t);
       if (recipeId) {
@@ -419,6 +433,7 @@ export default function App() {
       } else {
         setRecipeView(null);
       }
+      setListView(listId ?? null);
       isRestoringRef.current = false;
     };
     window.addEventListener("popstate", onPopState);
@@ -432,6 +447,7 @@ export default function App() {
     setWeek(initialWeek());
     setNextWeekMeals(initialWeek());
     setPrevWeekMeals(initialWeek());
+    setLists([]);
     setSnacks([]);
     setDesserts([]);
     loadAll();
@@ -542,12 +558,14 @@ export default function App() {
 
       const nextWs = addWeeks(ws, 1);
       const prevWs = addWeeks(ws, -1);
-      const [mealsRows, nextMealsRows, prevMealsRows, recipeRows, extrasRows] = await Promise.all([
+      const [mealsRows, nextMealsRows, prevMealsRows, recipeRows, extrasRows, listRows, listItemRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
         sb.get("meals", `?week_start=eq.${nextWs}`),
         sb.get("meals", `?week_start=eq.${prevWs}`),
         sb.get("recipes", "?order=created_at.asc"),
         sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
+        sb.get("lists", "?order=created_at.asc").catch(() => []),
+        sb.get("list_items", "?order=created_at.asc").catch(() => []),
       ]);
       const settingsRows = await sb.get("app_settings", "?key=eq.custom_tags").catch(() => []);
 
@@ -574,6 +592,26 @@ export default function App() {
 
       setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
       setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
+
+      // Nest list items under their lists; ensure the grocery singleton exists.
+      const itemsByList = {};
+      listItemRows.forEach(it => { (itemsByList[it.list_id] ||= []).push(it); });
+      const byPos = (a, b) => (a.position ?? 0) - (b.position ?? 0);
+      let builtLists = listRows.map(l => ({
+        id: l.id, name: l.name, type: l.type || "custom", icon: l.icon || "📝", position: l.position ?? 0,
+        items: (itemsByList[l.id] || []).map(it => ({
+          id: it.id, text: it.text || "", checked: !!it.checked, position: it.position ?? 0,
+          qty: it.qty || "", unit: it.unit || "", category: it.category || "", sourceRecipeId: it.source_recipe_id || null,
+        })).sort(byPos),
+      }));
+      if (!builtLists.some(l => l.type === "grocery")) {
+        const grocery = { id: GROCERY_ID, name: "Grocery", type: "grocery", icon: "🛒", position: -1, items: [] };
+        builtLists = [grocery, ...builtLists];
+        sb.upsert("lists", [listToRow(grocery)], "id").catch(e => console.error("Grocery init:", e));
+      }
+      // Grocery always pinned first, then by position/creation order.
+      builtLists.sort((a, b) => (a.type === "grocery" ? -1 : b.type === "grocery" ? 1 : (a.position ?? 0) - (b.position ?? 0)));
+      setLists(builtLists);
 
       if (settingsRows.length > 0 && settingsRows[0].value) {
         setCustomTags(prev => ({ ...prev, ...settingsRows[0].value }));
@@ -649,6 +687,47 @@ export default function App() {
 
   const recipesBySlot = (slot) => recipes.filter(r => r.mealTypes.includes(slot)).map(r => r.name);
 
+  // ─── List operations (optimistic state + per-row sync) ───────────────────────
+  const syncWrite = (label, p) => { if (isConfigured) p.then(() => setSyncStatus("synced")).catch(e => { console.error(label, e); setSyncStatus("error"); }); };
+
+  const addList = (name, icon) => {
+    const list = { id: genId(), name: name.trim() || "Untitled List", type: "custom", icon: icon || "📝", position: Date.now(), items: [] };
+    setLists(prev => [...prev, list]);
+    syncWrite("Add list:", sb.upsert("lists", [listToRow(list)], "id"));
+    return list.id;
+  };
+  const updateList = (id, fields) => {
+    let updated = null;
+    setLists(prev => prev.map(l => { if (l.id !== id) return l; updated = { ...l, ...fields }; return updated; }));
+    if (updated) syncWrite("Update list:", sb.upsert("lists", [listToRow(updated)], "id"));
+  };
+  const deleteList = (id) => {
+    if (id === GROCERY_ID) return; // grocery can't be deleted
+    setLists(prev => prev.filter(l => l.id !== id));
+    if (listView === id) navigate("lists", null);
+    syncWrite("Delete list:", sb.del("lists", `id=eq.${id}`)); // cascade removes items
+  };
+  const addListItem = (listId, text) => {
+    const t = text.trim(); if (!t) return;
+    const item = { id: genId(), text: t, checked: false, position: Date.now(), qty: "", unit: "", category: "", sourceRecipeId: null };
+    setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
+    syncWrite("Add item:", sb.upsert("list_items", [listItemToRow(item, listId)], "id"));
+  };
+  const toggleListItem = (listId, itemId) => {
+    let toggled = null;
+    setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(it => { if (it.id !== itemId) return it; toggled = { ...it, checked: !it.checked }; return toggled; }) }));
+    if (toggled) syncWrite("Toggle item:", sb.upsert("list_items", [listItemToRow(toggled, listId)], "id"));
+  };
+  const deleteListItem = (listId, itemId) => {
+    setLists(prev => prev.map(l => l.id === listId ? { ...l, items: l.items.filter(it => it.id !== itemId) } : l));
+    syncWrite("Delete item:", sb.del("list_items", `id=eq.${itemId}`));
+  };
+  const clearListItems = (listId, onlyChecked) => {
+    setLists(prev => prev.map(l => l.id === listId ? { ...l, items: onlyChecked ? l.items.filter(it => !it.checked) : [] } : l));
+    const q = onlyChecked ? `list_id=eq.${listId}&checked=eq.true` : `list_id=eq.${listId}`;
+    syncWrite("Clear items:", sb.del("list_items", q));
+  };
+
   return (
     <div style={s.appRoot}>
       <style>{css}</style>
@@ -676,6 +755,12 @@ export default function App() {
             onSave={saveRecipe} onDelete={deleteRecipe}
             customTags={customTags} onAddCustomTag={addCustomTag} onDeleteCustomTag={deleteCustomTag} />
         )}
+        {tab === "lists" && (
+          <ListsView lists={lists} openId={listView} syncStatus={syncStatus}
+            onOpen={(id) => navigate("lists", id ? { listId: id } : null)}
+            onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
+            onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems} />
+        )}
       </div>
       <nav style={s.bottomNav}>
         <button style={{ ...s.navBtn, ...(tab==="planner"?s.navBtnActive:{}) }} onClick={() => navigate("planner", null)}>
@@ -686,6 +771,10 @@ export default function App() {
           <span style={s.navIcon}>📖</span>
           <span style={s.navLabel}>Recipes</span>
           {recipes.length > 0 && <span style={s.navBadge}>{recipes.length}</span>}
+        </button>
+        <button style={{ ...s.navBtn, ...(tab==="lists"?s.navBtnActive:{}) }} onClick={() => navigate("lists", null)}>
+          <span style={s.navIcon}>🛒</span>
+          <span style={s.navLabel}>Lists</span>
         </button>
       </nav>
     </div>
@@ -1999,6 +2088,171 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
   );
 }
 
+// ─── Lists View ───────────────────────────────────────────────────────────────
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems }) {
+  const open = openId ? lists.find(l => l.id === openId) : null;
+  if (open) {
+    return <ListDetail list={open} onBack={() => onOpen(null)}
+      onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
+      onUpdateList={onUpdateList} onDeleteList={onDeleteList} />;
+  }
+  return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} />;
+}
+
+function ListIndex({ lists, syncStatus, onOpen, onAddList }) {
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [icon, setIcon] = useState("📝");
+  const grocery = lists.find(l => l.type === "grocery");
+  const custom = lists.filter(l => l.type !== "grocery");
+
+  const submit = () => {
+    const id = onAddList(name, icon);
+    setName(""); setIcon("📝"); setCreating(false);
+    onOpen(id);
+  };
+
+  const card = (l) => {
+    const open = l.items.filter(i => !i.checked).length;
+    return (
+      <button key={l.id} style={s.listCard} className="list-card" onClick={() => onOpen(l.id)}>
+        <span style={s.listCardIcon}>{l.icon}</span>
+        <div style={s.listCardBody}>
+          <div style={s.listCardName}>{l.name}</div>
+          <div style={s.listCardMeta}>{l.items.length === 0 ? "Empty" : `${open} of ${l.items.length} left`}</div>
+        </div>
+        <span style={s.listCardArrow}>›</span>
+      </button>
+    );
+  };
+
+  return (
+    <div style={s.recipesRoot}>
+      <div style={s.recipesHeader}>
+        <div><div style={s.eyebrow}>Lists</div><h1 style={s.title}>Your Lists</h1></div>
+        <button style={s.newRecipeBtn} className="new-recipe-btn" onClick={() => setCreating(true)}>+ New List</button>
+      </div>
+
+      {creating && (
+        <div style={s.listCreateBox}>
+          <div style={s.listIconRow}>
+            {LIST_ICONS.map(ic => (
+              <button key={ic} style={{...s.listIconPick,...(icon===ic?s.listIconPickOn:{})}} onClick={() => setIcon(ic)}>{ic}</button>
+            ))}
+          </div>
+          <div style={s.listCreateInputRow}>
+            <input style={{...s.editorInput,flex:1}} autoFocus placeholder="List name (e.g. Packing, Projects)…" value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && name.trim()) submit(); if (e.key === "Escape") { setCreating(false); setName(""); } }} />
+            <button style={{...s.btnSave,...(name.trim()?{}:s.btnDisabled)}} onClick={() => name.trim() && submit()}>Create</button>
+            <button style={s.btnClear} onClick={() => { setCreating(false); setName(""); }}>✕</button>
+          </div>
+        </div>
+      )}
+
+      {grocery && (
+        <>
+          <div style={s.listSectionLbl}>Grocery</div>
+          {card(grocery)}
+        </>
+      )}
+
+      <div style={s.listSectionLbl}>My Lists</div>
+      {custom.length === 0 ? (
+        <div style={s.listEmptyHint}>No custom lists yet. Create one for to-dos, packing, projects — anything.</div>
+      ) : custom.map(card)}
+
+      <div style={{height:40}} />
+    </div>
+  );
+}
+
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onUpdateList, onDeleteList }) {
+  const [input, setInput] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [nameDraft, setNameDraft] = useState(list.name);
+  const isGrocery = list.type === "grocery";
+
+  const unchecked = list.items.filter(i => !i.checked);
+  const checked = list.items.filter(i => i.checked);
+  const hasChecked = checked.length > 0;
+
+  const submit = () => { const t = input.trim(); if (!t) return; onAddItem(list.id, t); setInput(""); };
+  const saveName = () => { const n = nameDraft.trim(); if (n) onUpdateList(list.id, { name: n }); setRenaming(false); };
+
+  const itemRow = (it) => (
+    <div key={it.id} style={s.listItemRow}>
+      <button style={{...s.listCheck,...(it.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggleItem(list.id, it.id)}>
+        {it.checked ? "✓" : ""}
+      </button>
+      <span style={{...s.listItemText,...(it.checked?s.listItemTextChecked:{})}}>{it.text}</span>
+      <button style={s.listItemDel} className="list-item-del" onClick={() => onDeleteItem(list.id, it.id)}>✕</button>
+    </div>
+  );
+
+  return (
+    <div style={s.recipeDetailRoot}>
+      <div style={s.detailTopBar}>
+        <button style={s.detailBackBtn} className="back-btn" onClick={onBack}>← Lists</button>
+        <div style={{position:"relative"}}>
+          <button style={s.detailEditBtn} className="detail-edit-btn" onClick={() => setMenuOpen(o => !o)}>⋯</button>
+          {menuOpen && (
+            <>
+              <div style={s.listMenuBackdrop} onClick={() => setMenuOpen(false)} />
+              <div style={s.listMenu}>
+                {!isGrocery && <button style={s.listMenuItem} className="list-menu-item" onClick={() => { setRenaming(true); setNameDraft(list.name); setMenuOpen(false); }}>✏️ Rename</button>}
+                <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (hasChecked) onClearItems(list.id, true); setMenuOpen(false); }}>🧹 Clear checked</button>
+                <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (list.items.length) onClearItems(list.id, false); setMenuOpen(false); }}>🗑 Clear all</button>
+                {!isGrocery && <button style={{...s.listMenuItem,color:"#e07a5f"}} className="list-menu-item" onClick={() => { onDeleteList(list.id); setMenuOpen(false); }}>Delete list</button>}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div style={s.detailBody}>
+        <div style={s.listDetailTitleRow}>
+          <span style={{fontSize:26}}>{list.icon}</span>
+          {renaming ? (
+            <input style={{...s.editorInput,flex:1}} autoFocus value={nameDraft}
+              onChange={e => setNameDraft(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") saveName(); if (e.key === "Escape") setRenaming(false); }}
+              onBlur={saveName} />
+          ) : (
+            <h1 style={{...s.title,margin:0}}>{list.name}</h1>
+          )}
+        </div>
+
+        <div style={s.listAddRow}>
+          <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder="Add an item…" value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+          <button style={{...s.btnSave,...(input.trim()?{}:s.btnDisabled)}} onClick={submit}>Add</button>
+        </div>
+
+        {list.items.length === 0 ? (
+          <div style={s.listEmptyState}>
+            <div style={{fontSize:30,marginBottom:8}}>{isGrocery ? "🛒" : "📝"}</div>
+            <div style={s.listEmptyStateText}>{isGrocery ? "Your grocery list is empty. Add items above." : "Nothing here yet. Add your first item above."}</div>
+          </div>
+        ) : (
+          <div style={s.listItems}>
+            {unchecked.map(itemRow)}
+            {hasChecked && (
+              <>
+                <div style={s.listCheckedDivider}>{checked.length} done</div>
+                {checked.map(itemRow)}
+              </>
+            )}
+          </div>
+        )}
+        <div style={{height:40}} />
+      </div>
+    </div>
+  );
+}
+
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const BASE = { fontFamily:"'DM Sans',sans-serif" };
 const s = {
@@ -2355,6 +2609,39 @@ const s = {
   stepEditor: { display:"flex", flexDirection:"column", gap:8 },
   stepEditorRow: { display:"flex", gap:8, alignItems:"flex-start" },
   stepEditorNum: { width:26, height:26, borderRadius:"50%", background:"#3a2e22", color:"#c8a878", fontSize:12, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0, fontFamily:"'DM Sans',sans-serif", marginTop:10 },
+
+  // Lists
+  listSectionLbl: { fontSize:10, color:"#7a6448", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", margin:"18px 0 8px" },
+  listEmptyHint: { fontSize:13, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", lineHeight:1.5, padding:"4px 2px" },
+  listCard: { display:"flex", alignItems:"center", gap:12, width:"100%", background:"#241e16", border:"1px solid #3a2e22", borderRadius:13, padding:"13px 14px", cursor:"pointer", textAlign:"left", marginBottom:8, transition:"border-color 0.15s,transform 0.12s" },
+  listCardIcon: { fontSize:24, flexShrink:0, width:30, textAlign:"center" },
+  listCardBody: { flex:1, minWidth:0 },
+  listCardName: { fontSize:15.5, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  listCardMeta: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginTop:2 },
+  listCardArrow: { fontSize:22, color:"#5a4a36", flexShrink:0 },
+  listCreateBox: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:12, padding:"12px", marginBottom:10 },
+  listIconRow: { display:"flex", flexWrap:"wrap", gap:6, marginBottom:10 },
+  listIconPick: { background:"#241e16", border:"1.5px solid #3a2e22", borderRadius:9, width:38, height:38, fontSize:18, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" },
+  listIconPickOn: { borderColor:"#c8a878", background:"#2e2418" },
+  listCreateInputRow: { display:"flex", gap:8, alignItems:"center" },
+
+  listDetailTitleRow: { display:"flex", alignItems:"center", gap:10, marginBottom:16 },
+  listAddRow: { display:"flex", gap:8, alignItems:"center", marginBottom:16 },
+  listItems: { display:"flex", flexDirection:"column", gap:2 },
+  listItemRow: { display:"flex", alignItems:"center", gap:11, padding:"10px 2px", borderBottom:"1px solid #221b13" },
+  listCheck: { width:24, height:24, borderRadius:7, border:"1.5px solid #4a3c2a", background:"#1c1712", color:"#1c1712", fontSize:14, fontWeight:800, cursor:"pointer", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
+  listCheckOn: { background:"#8ac878", borderColor:"#8ac878", color:"#1c1712" },
+  listItemText: { flex:1, fontSize:15, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, wordBreak:"break-word" },
+  listItemTextChecked: { color:"#6a5a48", textDecoration:"line-through" },
+  listItemDel: { background:"none", border:"none", color:"#5a4a38", fontSize:13, cursor:"pointer", padding:"4px 6px", flexShrink:0 },
+  listCheckedDivider: { fontSize:10, color:"#7a6448", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", margin:"16px 0 6px" },
+  listEmptyState: { textAlign:"center", padding:"36px 16px", color:"#7a6448" },
+  listEmptyStateText: { fontSize:13.5, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", lineHeight:1.5 },
+
+  listMenuBackdrop: { position:"fixed", inset:0, zIndex:40 },
+  listMenu: { position:"absolute", top:"110%", right:0, background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:11, padding:6, minWidth:160, boxShadow:"0 14px 36px rgba(0,0,0,0.5)", zIndex:41, display:"flex", flexDirection:"column", gap:2 },
+  listMenuItem: { background:"none", border:"none", textAlign:"left", padding:"9px 11px", borderRadius:7, fontSize:13.5, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
+  listMenuItemDim: { opacity:0.4 },
 };
 
 const chips = {
@@ -2376,6 +2663,10 @@ const css = `
   .autofill-btn:hover { border-color: #c8a878 !important; background: #3a2e1c !important; }
   .af-shuffle-btn:hover { border-color: #c8a878 !important; color: #f4c97a !important; }
   .af-toggle-row:hover { border-color: #5a4a36 !important; }
+  .list-card:hover { border-color: #5a4a36 !important; transform: translateY(-1px); }
+  .list-item-del:hover { color: #e07a5f !important; }
+  .list-check:hover { border-color: #8ac878 !important; }
+  .list-menu-item:hover { background: #3a2e22 !important; }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
   .day-chip:hover { background: #2e2418 !important; border-color: #9a7f60 !important; color: #f4e4c4 !important; }
   .day-chip.day-chip-sel, .day-chip.day-chip-sel:hover { background: #3d3020 !important; border-color: #c8a878 !important; color: #f4e4c4 !important; }
