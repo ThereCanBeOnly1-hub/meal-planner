@@ -390,6 +390,8 @@ export default function App() {
   const [prevWeekMeals, setPrevWeekMeals] = useState(initialWeek());
   const [lists, setLists] = useState([]);
   const [listView, setListView] = useState(null); // open list id or null
+  const [groceryOpen, setGroceryOpen] = useState(false);
+  const groceryPopRef = useRef(false);
   const [customTags, setCustomTags] = useState(() => ({
     mealtypes: loadCustomTags("mealtypes"),
     diets: loadCustomTags("diets"),
@@ -439,6 +441,13 @@ export default function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  // Grocery quick-drawer: close on Android back (overlay history pattern)
+  useEffect(() => {
+    const onPop = () => { if (groceryOpen) { groceryPopRef.current = true; setGroceryOpen(false); groceryPopRef.current = false; } };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [groceryOpen]);
 
   // Reload when viewed week changes
   useEffect(() => {
@@ -687,6 +696,9 @@ export default function App() {
 
   const recipesBySlot = (slot) => recipes.filter(r => r.mealTypes.includes(slot)).map(r => r.name);
 
+  const openGrocery = () => { setGroceryOpen(true); history.pushState({ overlay: "grocery" }, ""); };
+  const closeGrocery = () => { setGroceryOpen(false); if (!groceryPopRef.current) history.back(); };
+
   // ─── List operations (optimistic state + per-row sync) ───────────────────────
   const syncWrite = (label, p) => { if (isConfigured) p.then(() => setSyncStatus("synced")).catch(e => { console.error(label, e); setSyncStatus("error"); }); };
 
@@ -780,6 +792,81 @@ export default function App() {
           <span style={s.navLabel}>Lists</span>
         </button>
       </nav>
+
+      {/* Grocery quick-access FAB (everywhere except the Lists tab) */}
+      {tab !== "lists" && !groceryOpen && (()=>{
+        const g = lists.find(l => l.type === "grocery");
+        const left = g ? g.items.filter(i => !i.checked).length : 0;
+        return (
+          <button style={s.groceryFab} className="grocery-fab" onClick={openGrocery} title="Grocery list">
+            <span style={{fontSize:22}}>🛒</span>
+            {left > 0 && <span style={s.groceryFabBadge}>{left}</span>}
+          </button>
+        );
+      })()}
+
+      {groceryOpen && (
+        <GroceryDrawer
+          list={lists.find(l => l.type === "grocery")}
+          onClose={closeGrocery}
+          onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
+          onOpenFull={() => { setGroceryOpen(false); navigate("lists", { listId: GROCERY_ID }); }} />
+      )}
+    </div>
+  );
+}
+
+// ─── Grocery quick-drawer ─────────────────────────────────────────────────────
+function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onOpenFull }) {
+  const [input, setInput] = useState("");
+  const items = list?.items || [];
+  const unchecked = items.filter(i => !i.checked);
+  const checked = items.filter(i => i.checked);
+  const submit = () => { const t = input.trim(); if (!t || !list) return; onAddItem(list.id, t); setInput(""); };
+
+  const row = (it) => (
+    <div key={it.id} style={s.listItemRow}>
+      <button style={{...s.listCheck,...(it.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggleItem(list.id, it.id)}>{it.checked ? "✓" : ""}</button>
+      <span style={{...s.listItemText,...(it.checked?s.listItemTextChecked:{})}}>{it.text}</span>
+      <button style={s.listItemDel} className="list-item-del" onClick={() => onDeleteItem(list.id, it.id)}>✕</button>
+    </div>
+  );
+
+  return (
+    <div style={s.groceryOverlay} onClick={onClose}>
+      <div style={s.groceryDrawer} onClick={e => e.stopPropagation()}>
+        <div style={s.groceryDrawerHead}>
+          <div style={s.groceryDrawerTitle}><span style={{fontSize:20,marginRight:8}}>🛒</span>Grocery</div>
+          <button style={s.modalClose} onClick={onClose}>✕</button>
+        </div>
+
+        <div style={s.listAddRow}>
+          <input style={{...s.modalInput,marginBottom:0,flex:1}} autoFocus placeholder="Add an item…" value={input}
+            onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+          <button style={{...s.btnSave,...(input.trim()?{}:s.btnDisabled)}} onClick={submit}>Add</button>
+        </div>
+
+        <div style={s.groceryDrawerBody}>
+          {items.length === 0 ? (
+            <div style={s.listEmptyState}><div style={{fontSize:28,marginBottom:8}}>🛒</div><div style={s.listEmptyStateText}>Grocery list is empty. Add items above.</div></div>
+          ) : (
+            <>
+              {unchecked.map(row)}
+              {checked.length > 0 && (
+                <>
+                  <div style={s.listCheckedDivider}>{checked.length} done</div>
+                  {checked.map(row)}
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        <div style={s.groceryDrawerFoot}>
+          {checked.length > 0 && <button style={s.btnClear} onClick={() => onClearItems(list.id, true)}>Clear checked</button>}
+          <button style={{...s.btnClear,marginLeft:"auto"}} onClick={onOpenFull}>Open full list →</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2645,6 +2732,16 @@ const s = {
   listMenu: { position:"absolute", top:"110%", right:0, background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:11, padding:6, minWidth:160, boxShadow:"0 14px 36px rgba(0,0,0,0.5)", zIndex:41, display:"flex", flexDirection:"column", gap:2 },
   listMenuItem: { background:"none", border:"none", textAlign:"left", padding:"9px 11px", borderRadius:7, fontSize:13.5, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
   listMenuItemDim: { opacity:0.4 },
+
+  // Grocery FAB + quick-drawer
+  groceryFab: { position:"fixed", right:16, bottom:72, width:54, height:54, borderRadius:"50%", background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", boxShadow:"0 8px 22px rgba(0,0,0,0.45)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex:48 },
+  groceryFabBadge: { position:"absolute", top:-3, right:-3, background:"#e07a5f", color:"#fff", fontSize:11, fontWeight:800, minWidth:20, height:20, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", padding:"0 5px", fontFamily:"'DM Sans',sans-serif", border:"2px solid #1c1712" },
+  groceryOverlay: { position:"fixed", inset:0, background:"rgba(12,10,8,0.6)", zIndex:110, display:"flex", justifyContent:"flex-end", backdropFilter:"blur(2px)" },
+  groceryDrawer: { width:"min(400px,90vw)", height:"100%", background:"#221a12", borderLeft:"1px solid #3a2e22", boxShadow:"-12px 0 40px rgba(0,0,0,0.5)", display:"flex", flexDirection:"column", padding:"16px", boxSizing:"border-box", animation:"drawerIn 0.22s ease" },
+  groceryDrawerHead: { display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 },
+  groceryDrawerTitle: { display:"flex", alignItems:"center", fontSize:19, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif" },
+  groceryDrawerBody: { flex:1, overflowY:"auto", marginTop:4 },
+  groceryDrawerFoot: { display:"flex", alignItems:"center", gap:8, paddingTop:12, marginTop:8, borderTop:"1px solid #3a2e22" },
 };
 
 const chips = {
@@ -2670,6 +2767,9 @@ const css = `
   .list-item-del:hover { color: #e07a5f !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
+  .grocery-fab:hover { transform: scale(1.06); }
+  .grocery-fab:active { transform: scale(0.96); }
+  @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
   .day-chip:hover { background: #2e2418 !important; border-color: #9a7f60 !important; color: #f4e4c4 !important; }
   .day-chip.day-chip-sel, .day-chip.day-chip-sel:hover { background: #3d3020 !important; border-color: #c8a878 !important; color: #f4e4c4 !important; }
