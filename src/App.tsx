@@ -535,7 +535,7 @@ export default function App() {
     }
   };
 
-  // Load on mount + poll every 20s
+  // Set up history + back-button handling on mount
   useEffect(() => {
     history.replaceState({ tab: "planner", recipeId: null, recipeEdit: false }, "");
     const onPopState = (e: PopStateEvent) => {
@@ -968,7 +968,6 @@ export default function App() {
   const addWeekToGrocery = () => addRecipesToGrocery(weekRecipeList());
 
   // ─── Categorization (Shopping Mode) ──────────────────────────────────────────
-  const catOf = (item) => ingredientCats[normIngredient(item.text)] || "other";
   const saveIngredientCats = (next) => { if (isConfigured) sb.upsert("app_settings", [{ key: "ingredient_categories", value: next }], "key").catch(e => console.error("Cat cache save:", e)); };
 
   // Categorize any grocery items whose ingredient isn't cached yet (one batched call).
@@ -2805,7 +2804,6 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
-const BASE = { fontFamily:"'DM Sans',sans-serif" };
 const s = {
   // App shell
   appRoot: { minHeight:"100vh", background:"#1c1712", fontFamily:"'Lora',Georgia,serif", color:"#f0e8d8", display:"flex", flexDirection:"column", overflowX:"hidden" },
@@ -3065,12 +3063,8 @@ const s = {
   recipeCardContent: { padding:"10px 12px 12px", display:"flex", flexDirection:"column", gap:5, flex:1 },
   recipeCardName: { fontSize:14, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", lineHeight:1.2 },
   recipeCardTime: { fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
-  recipeCardTimes: { display:"flex", gap:8, flexWrap:"wrap" },
-  recipeTime: { fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
   recipeCardDesc: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" },
-  recipeCardBottom: { display:"flex", alignItems:"center", justifyContent:"space-between" },
   recipeCardTags: { display:"flex", gap:4, flexWrap:"wrap", alignItems:"flex-start", marginTop:"auto", paddingTop:4 },
-  recipeCardLink: { fontSize:14, flexShrink:0 },
 
   tag: { fontSize:10, borderRadius:8, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
   tagMeal: { background:"#2e2c18", color:"#c8b840", border:"1px solid #4a4428" },
