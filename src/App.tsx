@@ -1432,6 +1432,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
   const [dessertSugOpen, setDessertSugOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [dayClearConfirm, setDayClearConfirm] = useState(null); // day name pending clear-confirm
   const [afOpen, setAfOpen] = useState(false);
   const [afMode, setAfMode] = useState("empty"); // "empty" | "replace"
   const [afSlots, setAfSlots] = useState(() => new Set());
@@ -1460,13 +1461,14 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
       isRestoringRef.current = true;
       if (modal) { setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false); }
       else if (showClearConfirm) { setShowClearConfirm(false); }
+      else if (dayClearConfirm) { setDayClearConfirm(null); }
       else if (afOpen) { setAfOpen(false); setAfConfirm(false); }
       else if (panelOpen) { setPanelOpen(false); }
       isRestoringRef.current = false;
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [modal, showClearConfirm, panelOpen, afOpen]);
+  }, [modal, showClearConfirm, dayClearConfirm, panelOpen, afOpen]);
 
   // A linked meal shows the recipe's CURRENT name (so renaming the recipe keeps
   // the planner in sync); falls back to the stored meal text otherwise.
@@ -1505,12 +1507,13 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
   };
 
   const clearDay = (day) => {
-    if (!window.confirm(`Clear all meals for ${day}?`)) return;
     setWeek(prev => {
       const cleared = {};
       MEAL_SLOTS.forEach(sl => (cleared[sl] = { meal: "", thaw: false, thawDays: 2, recipeId: null }));
       return { ...prev, [day]: cleared };
     });
+    setDayClearConfirm(null);
+    history.back();
   };
 
   const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); history.back(); };
@@ -1827,7 +1830,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
                     )}
                     {hasMeals && (
                       <button style={s.dayClearBtn} className="day-clear-btn" title="Clear this day"
-                        onClick={e=>{e.stopPropagation(); clearDay(day);}}>🗑</button>
+                        onClick={e=>{e.stopPropagation(); setDayClearConfirm(day); history.pushState({ overlay: "dayClearConfirm" }, "");}}>🗑</button>
                     )}
                   </div>
                 </div>
@@ -2036,6 +2039,20 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
             <div style={{display:"flex",gap:10,justifyContent:"center"}}>
               <button style={s.btnClear} onClick={()=>{ setShowClearConfirm(false); history.back(); }}>Cancel</button>
               <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={clearWeek}>Clear Week</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {dayClearConfirm && (
+        <div style={s.overlay} onClick={()=>{ setDayClearConfirm(null); history.back(); }}>
+          <div style={{...s.modal,maxWidth:320,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
+            <div style={{fontSize:32,marginBottom:12}}>🗑</div>
+            <div style={{...s.modalTitle,fontSize:18,marginBottom:8}}>Clear {dayClearConfirm}'s meals?</div>
+            <div style={{fontSize:13,color:"#9a7f60",marginBottom:24,fontFamily:"'DM Sans',sans-serif"}}>This removes every meal for {dayClearConfirm}. Can't be undone.</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <button style={s.btnClear} onClick={()=>{ setDayClearConfirm(null); history.back(); }}>Cancel</button>
+              <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={()=>clearDay(dayClearConfirm)}>Clear Day</button>
             </div>
           </div>
         </div>
