@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseMinutes, formatMinutes,
   parseQty, formatQty, scaleAmount,
-  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput,
+  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput, parseItemQty, sumSourceMeasures,
   normalizeImported, addWeeks,
   mealCellEq, mealRow,
   afLayBlocks, generateSlotPlan, layoutPickerOrder,
@@ -127,6 +127,23 @@ describe("parseQtyInput (manual quantity edit)", () => {
   it("keeps non-numeric quantities as text, and empty as none", () => {
     expect(parseQtyInput("a dozen")).toEqual([{ text: "a dozen" }]);
     expect(parseQtyInput("")).toEqual([]);
+  });
+});
+
+describe("per-recipe quantity model", () => {
+  it("sumSourceMeasures adds matching units across recipes (the subtraction primitive)", () => {
+    const sources = [
+      { id: "r1", name: "Tacos", measures: [{ amount: 1, unit: "lb" }] },
+      { id: "r2", name: "Soup", measures: [{ amount: 1, unit: "lb" }] },
+    ];
+    expect(formatMeasures(sumSourceMeasures(sources))).toBe("2 lb");
+    // removing Soup → re-sum the rest → 1 lb
+    expect(formatMeasures(sumSourceMeasures(sources.filter(s => s.id !== "r2")))).toBe("1 lb");
+  });
+  it("parseItemQty reads legacy arrays and the new {measures,manual} shape", () => {
+    expect(parseItemQty(JSON.stringify([{ amount: 2, unit: "lb" }]))).toEqual({ measures: [{ amount: 2, unit: "lb" }], manual: false });
+    expect(parseItemQty(JSON.stringify({ measures: [{ amount: 3, unit: "lb" }], manual: true }))).toEqual({ measures: [{ amount: 3, unit: "lb" }], manual: true });
+    expect(parseItemQty(null)).toEqual({ measures: [], manual: false });
   });
 });
 

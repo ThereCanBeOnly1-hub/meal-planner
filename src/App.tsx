@@ -308,16 +308,29 @@ const GROCERY_ID = "grocery"; // fixed id makes the singleton idempotent across 
 const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const LIST_ICONS = ["📝", "✅", "🧳", "🛠", "🎁", "🏠", "💡", "🛒", "📦", "🌱", "🎉", "✈️"];
 const listToRow = (l) => ({ id: l.id, name: l.name, type: l.type, icon: l.icon, position: l.position ?? 0, updated_at: new Date().toISOString() });
-// measures[] (quantities) is stored as JSON in `qty`; sources[] (contributing
-// recipes) as JSON in `source_recipe_id`. Empty arrays store as null.
+// `qty` column holds { measures, manual } (the displayed total + override flag);
+// `source_recipe_id` holds sources[] = {id,name,measures} (per-recipe amounts).
 const listItemToRow = (it, listId) => ({
   id: it.id, list_id: listId, text: it.text, checked: !!it.checked, position: it.position ?? 0,
-  qty: it.measures && it.measures.length ? JSON.stringify(it.measures) : null,
+  qty: (it.measures && it.measures.length) || it.manual ? JSON.stringify({ measures: it.measures || [], manual: !!it.manual }) : null,
   unit: null, category: it.category || null,
   source_recipe_id: it.sources && it.sources.length ? JSON.stringify(it.sources) : null,
   updated_at: new Date().toISOString(),
 });
 const parseJsonArr = (raw) => { if (!raw) return []; try { const v = typeof raw === "string" ? JSON.parse(raw) : raw; return Array.isArray(v) ? v : []; } catch { return []; } };
+// Accepts the legacy shape (a bare measures array) or the new { measures, manual } object.
+const parseItemQty = (raw) => {
+  if (!raw) return { measures: [], manual: false };
+  try {
+    const v = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (Array.isArray(v)) return { measures: v, manual: false };
+    if (v && typeof v === "object") return { measures: Array.isArray(v.measures) ? v.measures : [], manual: !!v.manual };
+  } catch {}
+  return { measures: [], manual: false };
+};
+// Total of an item's per-recipe source measures (used when not manually overridden).
+const sumSourceMeasures = (sources) => (sources || []).reduce((acc, s) => mergeMeasures(acc, s.measures || []), []);
+const sourcesHaveAmounts = (sources) => (sources || []).length > 0 && sources.every(s => Array.isArray(s.measures));
 
 // Normalized key for matching the same grocery ingredient (drops prep notes after a comma).
 const groceryKey = (name) => String(name || "").trim().toLowerCase().split(",")[0].replace(/\s+/g, " ").trim();
@@ -510,7 +523,7 @@ export {
   parseMinutes, formatMinutes,
   parseQty, formatQty, scaleAmount,
   normalizeImported, recipeToRow,
-  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput,
+  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput, parseItemQty, sumSourceMeasures,
   afSample, afLayBlocks, afPlanKey, generateSlotPlan, generateWeekPlan,
   layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart,
   mealRow, mealCellEq,
@@ -824,10 +837,11 @@ export default function App() {
       const byPos = (a, b) => (a.position ?? 0) - (b.position ?? 0);
       let builtLists = listRows.map(l => ({
         id: l.id, name: l.name, type: l.type || "custom", icon: l.icon || "📝", position: l.position ?? 0,
-        items: (itemsByList[l.id] || []).map(it => ({
-          id: it.id, text: it.text || "", checked: !!it.checked, position: it.position ?? 0,
-          category: it.category || "", measures: parseJsonArr(it.qty), sources: parseJsonArr(it.source_recipe_id),
-        })).sort(byPos),
+        items: (itemsByList[l.id] || []).map(it => {
+          const q = parseItemQty(it.qty);
+          return { id: it.id, text: it.text || "", checked: !!it.checked, position: it.position ?? 0,
+            category: it.category || "", measures: q.measures, manual: q.manual, sources: parseJsonArr(it.source_recipe_id) };
+        }).sort(byPos),
       }));
       if (!builtLists.some(l => l.type === "grocery")) {
         const grocery = { id: GROCERY_ID, name: "Grocery", type: "grocery", icon: "🛒", position: -1, items: [] };
@@ -982,7 +996,7 @@ export default function App() {
     const t = text.trim(); if (!t) return;
     const list = lists.find(l => l.id === listId);
     const pos = (list ? list.items.reduce((m, i) => Math.max(m, i.position || 0), 0) : 0) + 1;
-    const item = { id: genId(), text: t, checked: false, position: pos, category: "", measures: [], sources: [] };
+    const item = { id: genId(), text: t, checked: false, position: pos, category: "", measures: [], manual: false, sources: [] };
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
     trackPending(item.id, { kind: "item", listId, item });
     syncWrite("Couldn't save the item", () => sb.upsert("list_items", [listItemToRow(item, listId)], "id"), [item.id]);
@@ -1017,36 +1031,42 @@ export default function App() {
     if (!grocery) return { added: 0, merged: 0 };
     addGroceryBusyRef.current = true;
     setTimeout(() => { addGroceryBusyRef.current = false; }, 700);
+    // Build per-recipe contributions for each ingredient key.
     const candByKey = new Map();
     recipesToAdd.forEach(rec => (rec.ingredients || []).forEach(ing => {
       const name = (ing.name || "").trim(); if (!name) return;
       const key = groceryKey(name);
       const measure = ingredientToMeasure(ing.amount, ing.unit);
-      const src = { id: rec.id, name: rec.name };
       let c = candByKey.get(key);
-      if (!c) { c = { text: name, measures: [], sources: [] }; candByKey.set(key, c); }
-      if (measure) c.measures = mergeMeasures(c.measures, [measure]);
-      if (!c.sources.some(s => s.id === src.id)) c.sources.push(src);
+      if (!c) { c = { text: name, byRecipe: new Map() }; candByKey.set(key, c); }
+      let sc = c.byRecipe.get(rec.id);
+      if (!sc) { sc = { id: rec.id, name: rec.name, measures: [] }; c.byRecipe.set(rec.id, sc); }
+      if (measure) sc.measures = mergeMeasures(sc.measures, [measure]);
     }));
     if (candByKey.size === 0) return { added: 0, merged: 0 };
 
     let added = 0, merged = 0;
     const rows = [];
     const changedIds = [];
-    const items = grocery.items.map(it => ({ ...it, measures: [...(it.measures || [])], sources: [...(it.sources || [])] }));
+    const items = grocery.items.map(it => ({ ...it, measures: [...(it.measures || [])], sources: (it.sources || []).map(s => ({ ...s, measures: s.measures ? [...s.measures] : undefined })) }));
     let maxPos = items.reduce((mx, i) => Math.max(mx, i.position || 0), 0);
     const newItems = [];
     candByKey.forEach((c, key) => {
       const existing = items.find(it => (it.sources && it.sources.length > 0) && groceryKey(it.text) === key);
       if (existing) {
-        existing.measures = mergeMeasures(existing.measures, c.measures);
-        c.sources.forEach(s => { if (!existing.sources.some(x => x.id === s.id)) existing.sources.push(s); });
+        c.byRecipe.forEach((sc) => {
+          const ex = existing.sources.find(s => s.id === sc.id);
+          if (ex) ex.measures = sc.measures;       // same recipe re-added → fixed amount (no double-count)
+          else existing.sources.push(sc);
+        });
+        if (!existing.manual) existing.measures = sumSourceMeasures(existing.sources);
         rows.push(listItemToRow(existing, grocery.id));
         trackPending(existing.id, { kind: "item", listId: grocery.id, item: existing });
         changedIds.push(existing.id);
         merged++;
       } else {
-        const item = { id: genId(), text: c.text, checked: false, position: ++maxPos, category: "", measures: c.measures, sources: c.sources };
+        const sources = [...c.byRecipe.values()];
+        const item = { id: genId(), text: c.text, checked: false, position: ++maxPos, category: "", manual: false, measures: sumSourceMeasures(sources), sources };
         newItems.push(item);
         rows.push(listItemToRow(item, grocery.id));
         trackPending(item.id, { kind: "item", listId: grocery.id, item });
@@ -1087,8 +1107,11 @@ export default function App() {
       const srcs = it.sources || [];
       const remaining = srcs.filter(s => !idSet.has(s.id));
       if (remaining.length === srcs.length) { nextItems.push(it); return; } // unaffected (incl. manual)
-      if (remaining.length === 0) { delIds.push(it.id); removed++; }
-      else { const nit = { ...it, sources: remaining }; nextItems.push(nit); upRows.push(listItemToRow(nit, grocery.id)); upIds.push(nit.id); kept++; }
+      if (remaining.length === 0 && !it.manual) { delIds.push(it.id); removed++; return; }
+      // Keep: re-sum the remaining recipes' amounts (unless overridden or legacy item without per-recipe amounts).
+      const measures = (!it.manual && sourcesHaveAmounts(srcs)) ? sumSourceMeasures(remaining) : it.measures;
+      const nit = { ...it, sources: remaining, measures };
+      nextItems.push(nit); upRows.push(listItemToRow(nit, grocery.id)); upIds.push(nit.id); kept++;
     });
     if (!delIds.length && !upRows.length) return { removed: 0, kept: 0 };
     setLists(prev => prev.map(l => l.id === grocery.id ? { ...l, items: nextItems } : l));
@@ -1099,10 +1122,13 @@ export default function App() {
     return { removed, kept };
   };
   const removeRecipeFromGrocery = (recipeId) => removeRecipesFromGrocery([recipeId]);
-  // Manual quantity override on a grocery item.
+  // Manual quantity override on a grocery item. For recipe-sourced items this
+  // sets the `manual` flag (moves it to the "Adjusted" section); the per-recipe
+  // source amounts are kept so the breakdown still shows what each recipe needs.
   const setItemQty = (listId, itemId, text) => {
     const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
-    const updated = { ...it, measures: parseQtyInput(text) };
+    const hasSources = (it.sources || []).length > 0;
+    const updated = { ...it, measures: parseQtyInput(text), manual: hasSources };
     setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(x => x.id === itemId ? updated : x) }));
     trackPending(itemId, { kind: "item", listId, item: updated });
     syncWrite("Couldn't save the quantity", () => sb.upsert("list_items", [listItemToRow(updated, listId)], "id"), [itemId]);
@@ -2855,7 +2881,7 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
         <div style={{...s.listItemText,...(item.checked?s.listItemTextChecked:{})}}>
           {measures
             ? (qtyEditable
-                ? <button style={s.listItemQtyBtn} className="list-qty-btn" onClick={startEdit}>{measures}</button>
+                ? <button style={s.listItemQtyBtn} className="list-qty-btn" onClick={startEdit}>{measures}{item.manual && hasSrc ? " ✎" : ""}</button>
                 : <span style={s.listItemQty}>{measures} </span>)
             : (qtyEditable && !item.checked ? <button style={s.listItemQtyAdd} className="list-qty-btn" onClick={startEdit}>+ qty</button> : null)}
           {measures && qtyEditable ? " " : ""}{item.text}
@@ -2869,7 +2895,14 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
               onBlur={saveQty} />
           </div>
         )}
-        {hasSrc && showSrc && <div style={s.listItemSrcNames}>{sources.map(s => abbrev(s.name, 24)).join(", ")}</div>}
+        {hasSrc && showSrc && (
+          <div style={s.listItemSrcNames}>
+            {sources.map(sr => (
+              <div key={sr.id}>{sr.measures && sr.measures.length ? <span style={s.listItemSrcQty}>{formatMeasures(sr.measures)} </span> : null}{sr.name}</div>
+            ))}
+            {item.manual && <div style={s.listItemSrcOverride}>✎ You set: {measures || "—"}</div>}
+          </div>
+        )}
       </div>
       {hasSrc && <button style={s.listSrcIcon} className="list-src-icon" onClick={() => setShowSrc(v => !v)} title={sources.map(s => s.name).join(", ")}>🍽</button>}
       <button style={s.listItemDel} className="list-item-del" onClick={() => onDelete(listId, item.id)}>✕</button>
@@ -2883,13 +2916,17 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditabl
   const dupKeys = computeDupKeys(items);
   const unchecked = items.filter(i => !i.checked);
   const checked = items.filter(i => i.checked);
-  const manual = unchecked.filter(i => !(i.sources && i.sources.length));
-  const recipe = unchecked.filter(i => i.sources && i.sources.length);
+  const manual = unchecked.filter(i => !(i.sources && i.sources.length));            // added by you
+  const adjusted = unchecked.filter(i => i.sources && i.sources.length && i.manual); // recipe item, quantity overridden
+  const recipe = unchecked.filter(i => i.sources && i.sources.length && !i.manual);  // from recipes
   const rowOf = (it) => <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} qtyEditable={qtyEditable} />;
+  const aboveRecipe = manual.length > 0 || adjusted.length > 0;
   return (
     <div style={s.listItems}>
       {manual.map(rowOf)}
-      {manual.length > 0 && recipe.length > 0 && <div style={s.listGroupDivider} />}
+      {adjusted.length > 0 && <div style={s.listSectionHead}>Adjusted</div>}
+      {adjusted.map(rowOf)}
+      {recipe.length > 0 && aboveRecipe && <div style={s.listSectionHead}>From recipes</div>}
       {recipe.map(rowOf)}
       {checked.length > 0 && (
         <>
@@ -3483,7 +3520,10 @@ const s = {
   listItemQtyAdd: { background:"none", border:"1px dashed #4a3c2a", borderRadius:6, padding:"0 6px", color:"#7a6448", fontSize:11, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", marginRight:5 },
   listQtyEditRow: { marginTop:6 },
   listQtyInput: { width:"100%", maxWidth:160, background:"#1c1712", border:"1.5px solid #c8a878", borderRadius:8, padding:"6px 10px", fontSize:14, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" },
-  listItemSrcNames: { fontSize:11, color:"#89a98c", fontFamily:"'DM Sans',sans-serif", marginTop:3 },
+  listItemSrcNames: { fontSize:11.5, color:"#89a98c", fontFamily:"'DM Sans',sans-serif", marginTop:4, display:"flex", flexDirection:"column", gap:2 },
+  listItemSrcQty: { color:"#7ab89a", fontWeight:700 },
+  listItemSrcOverride: { color:"#c8a878", marginTop:2, paddingTop:2, borderTop:"1px solid #2a2a22" },
+  listSectionHead: { fontSize:10, color:"#7a6448", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", margin:"14px 0 5px" },
   listSrcIcon: { background:"none", border:"none", fontSize:14, cursor:"pointer", padding:"4px 4px", flexShrink:0, opacity:0.85, lineHeight:1 },
   listGroupDivider: { height:1, background:"#3a2e22", margin:"7px 0" },
   listItemDup: { fontSize:9, color:"#e0a84a", background:"#2e2418", border:"1px solid #6a5320", borderRadius:5, padding:"1px 5px", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", fontWeight:700, marginLeft:7, verticalAlign:"middle", whiteSpace:"nowrap" },
