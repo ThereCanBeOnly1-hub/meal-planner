@@ -40,7 +40,7 @@
 ## Key components
 
 - **App**: top-level state, data fetching, sync
-- **PlannerView**: week grid, header with week nav + weather, thaw banners, meal modal, extras panel, Auto-Fill panel
+- **PlannerView**: week grid, header with week nav + weather, thaw banners, meal modal, extras panel, Auto-Fill panel. Bottom-nav tab labelled "Meals" (🍽️) but the internal tab key is still `"planner"`. Per-day 🗑 "clear day" (confirm). A meal not tied to a recipe shows "➕ Create a recipe" in its modal → `createRecipeFromMeal` opens a pre-filled new recipe editor and stashes `pendingMealLinkRef`; on save the meal cell gets the new `recipeId` (and the user lands back on Meals). `displayMealName(entry)` shows a linked meal's name from the *recipe* (so renaming the recipe keeps the planner in sync), falling back to the stored `meal` text.
 
 ## Auto-Fill
 

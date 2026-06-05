@@ -548,6 +548,7 @@ export default function App() {
   const lastSyncedWeekRef = useRef(null);    // baseline week to diff against for per-cell sync
   const lastSyncedWsRef = useRef(null);      // which week_start the baseline belongs to
   const extrasDirtyRef = useRef({ ws: null, ts: 0 }); // recent local extras edit, to guard against poll clobber
+  const pendingMealLinkRef = useRef(null); // {ws,day,slot,recipeId} when creating a recipe from a planner meal
   const lastPayloadSigRef = useRef(""); // signature of last applied load, to skip no-op re-renders
   const syncExtrasLockRef = useRef(false);
   const lastVisibilityLoadRef = useRef(0);
@@ -893,13 +894,30 @@ export default function App() {
     dbWrite("Couldn't save snacks/desserts", run).finally(() => { syncExtrasLockRef.current = false; });
   };
 
+  // Create a new recipe pre-filled from a planner meal; remember which cell to
+  // link once it's saved.
+  const createRecipeFromMeal = (name, day, slot) => {
+    const r = { ...newRecipe(), name };
+    pendingMealLinkRef.current = { ws: viewedWeekStartRef.current, day, slot, recipeId: r.id };
+    navigate("recipes", { recipe: r, edit: true });
+  };
+
   const saveRecipe = (recipe) => {
     recipe = { ...recipe, name: recipe.name.trim() };
     setRecipes(prev => {
       const exists = prev.find(r => r.id === recipe.id);
       return exists ? prev.map(r => r.id === recipe.id ? recipe : r) : [...prev, recipe];
     });
-    navigate("recipes", { recipe });
+    const link = pendingMealLinkRef.current;
+    if (link && link.recipeId === recipe.id) {
+      pendingMealLinkRef.current = null;
+      if (link.ws === viewedWeekStartRef.current) {
+        setWeek(prev => ({ ...prev, [link.day]: { ...prev[link.day], [link.slot]: { ...prev[link.day][link.slot], meal: recipe.name, recipeId: recipe.id } } }));
+      }
+      navigate("planner", null); // back to the Meals tab to see the linked meal
+    } else {
+      navigate("recipes", { recipe });
+    }
     dbWrite("Couldn't save the recipe", () => sb.upsert("recipes", [recipeToRow(recipe)]));
   };
 
@@ -1118,7 +1136,8 @@ export default function App() {
             onViewRecipe={(name) => {
               const r = recipes.find(r => r.name.toLowerCase() === name.toLowerCase());
               if (r) navigate("recipes", { recipe: r });
-            }} />
+            }}
+            onCreateRecipeFromMeal={createRecipeFromMeal} />
         )}
         {tab === "recipes" && (
           <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
@@ -1136,8 +1155,8 @@ export default function App() {
       </div>
       <nav style={s.bottomNav}>
         <button style={{ ...s.navBtn, ...(tab==="planner"?s.navBtnActive:{}) }} onClick={() => navigate("planner", null)}>
-          <span style={s.navIcon}>📅</span>
-          <span style={s.navLabel}>Planner</span>
+          <span style={s.navIcon}>🍽️</span>
+          <span style={s.navLabel}>Meals</span>
         </button>
         <button style={{ ...s.navBtn, ...(tab==="recipes"?s.navBtnActive:{}) }} onClick={() => navigate("recipes", null)}>
           <span style={s.navIcon}>📖</span>
@@ -1398,7 +1417,7 @@ function ThawItemRow({ item }) {
 // ─── Planner View ─────────────────────────────────────────────────────────────
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, prevWeekMeals, weatherData, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
+function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromMeal, week, setWeek, snacks, setSnacks, desserts, setDesserts, syncStatus, viewedWeekStart, nextWeekMeals, prevWeekMeals, weatherData, onPrevWeek, onNextWeek, onGoToWeek, onGoToToday }) {
   const [modal, setModal] = useState(null);
   const [inputVal, setInputVal] = useState("");
   const [thawOn, setThawOn] = useState(false);
@@ -1449,9 +1468,13 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     return () => window.removeEventListener("popstate", onPopState);
   }, [modal, showClearConfirm, panelOpen, afOpen]);
 
+  // A linked meal shows the recipe's CURRENT name (so renaming the recipe keeps
+  // the planner in sync); falls back to the stored meal text otherwise.
+  const displayMealName = (e) => { const r = e?.recipeId ? recipes.find(x => x.id === e.recipeId) : null; return r ? r.name : (e?.meal || ""); };
+
   const openModal = (day, slot) => {
     const cur = week[day][slot];
-    setModal({ day, slot }); setInputVal(cur.meal);
+    setModal({ day, slot }); setInputVal(displayMealName(cur));
     setThawOn(cur.thaw); setThawDays(cur.thawDays);
     setCopyDays([]); setShowCopyTo(false);
     history.pushState({ overlay: "modal" }, "");
@@ -1481,7 +1504,27 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
     setWeek(prev => ({ ...prev, [day]: { ...prev[day], [slot]: { meal:"", thaw:false, thawDays:2, recipeId:null } } }));
   };
 
+  const clearDay = (day) => {
+    if (!window.confirm(`Clear all meals for ${day}?`)) return;
+    setWeek(prev => {
+      const cleared = {};
+      MEAL_SLOTS.forEach(sl => (cleared[sl] = { meal: "", thaw: false, thawDays: 2, recipeId: null }));
+      return { ...prev, [day]: cleared };
+    });
+  };
+
   const clearWeek = () => { setWeek(initialWeek()); setShowClearConfirm(false); history.back(); };
+
+  // Save the meal as-is and jump to a new recipe editor pre-filled with its name;
+  // the meal gets linked to the recipe when it's saved (see App.saveRecipe).
+  const createFromMeal = () => {
+    const name = inputVal.trim(); if (!name || !modal) return;
+    const day = modal.day, slot = modal.slot;
+    const matched = recipes.find(r => r.name.trim().toLowerCase() === name.toLowerCase());
+    setWeek(prev => ({ ...prev, [day]: { ...prev[day], [slot]: { meal: name, thaw: thawOn, thawDays, recipeId: matched ? matched.id : null } } }));
+    setModal(null); setInputVal(""); setThawOn(false); setThawDays(2); setCopyDays([]); setShowCopyTo(false);
+    onCreateRecipeFromMeal(name, day, slot);
+  };
 
   // ─── Auto-Fill ───────────────────────────────────────────────────────────────
   const afEligibleSlots = MEAL_SLOTS.filter(slot => recipes.some(r => (r.mealTypes || []).includes(slot)));
@@ -1631,7 +1674,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
       const e = weekData[day][slot];
       if (e.meal && e.thaw) {
         const md = getDateForDay(day, ws); const td = new Date(md); td.setDate(md.getDate()-e.thawDays);
-        items.push({ mealName:e.meal, slot, day, thawDays:e.thawDays, thawDate:td, ws });
+        items.push({ mealName:displayMealName(e), slot, day, thawDays:e.thawDays, thawDate:td, ws });
       }
     }));
     return items.sort((a,b) => a.thawDate-b.thawDate);
@@ -1782,6 +1825,10 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                       <button style={{...s.dayCopyBtn,...(isDayCopying?s.dayCopyBtnActive:{})}} className="day-copy-btn"
                         onClick={e=>{e.stopPropagation(); setDayCopyDay(isDayCopying?null:day); setDayCopyTargets([]);}}>⎘</button>
                     )}
+                    {hasMeals && (
+                      <button style={s.dayClearBtn} className="day-clear-btn" title="Clear this day"
+                        onClick={e=>{e.stopPropagation(); clearDay(day);}}>🗑</button>
+                    )}
                   </div>
                 </div>
                 {isDayCopying && (
@@ -1821,7 +1868,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                             {mealWeather && <span style={s.slotWeather}>{mealWeather.icon} {mealWeather.temp}°</span>}
                           </div>
                           <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
-                            {val ? <span style={s.slotMeal}>{val}</span> : <span style={s.slotPlaceholder}>+ Add</span>}
+                            {val ? <span style={s.slotMeal}>{linkedRecipeForCard ? linkedRecipeForCard.name : val}</span> : <span style={s.slotPlaceholder}>+ Add</span>}
                             {linkedRecipeForCard && (
                               <button style={s.slotRecipeBtn} className="slot-recipe-btn"
                                 onClick={e=>{e.stopPropagation(); onViewRecipe(linkedRecipeForCard.name);}}>
@@ -2026,6 +2073,19 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, week, setWeek, snac
                     View Recipe →
                   </button>
                 </div>
+              );
+            })()}
+
+            {/* Create a recipe for a typed-in meal that isn't a recipe yet */}
+            {(() => {
+              const slotEntry = modal ? week[modal.day][modal.slot] : null;
+              const byId = slotEntry?.recipeId ? recipes.find(r => r.id === slotEntry.recipeId) : null;
+              const byName = inputVal.trim() ? recipes.find(r => r.name.trim().toLowerCase() === inputVal.trim().toLowerCase()) : null;
+              if (byId || byName || !inputVal.trim()) return null;
+              return (
+                <button style={s.createRecipeBtn} className="create-recipe-btn" onClick={createFromMeal}>
+                  ➕ Create a recipe for "{inputVal.trim()}"
+                </button>
               );
             })()}
 
@@ -3095,6 +3155,8 @@ const s = {
   copyPreview: { fontSize:11, color:"#89c4a1", marginTop:7, fontFamily:"'DM Sans',sans-serif" },
   dayCopyBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:5, padding:"2px 7px", fontSize:12, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4 },
   dayCopyBtnActive: { borderColor:"#c8a878", color:"#c8a878", background:"#2e2418" },
+  dayClearBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:5, padding:"2px 7px", fontSize:12, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4 },
+  createRecipeBtn: { width:"100%", background:"#1e1830", border:"1px solid #3a2858", borderRadius:9, padding:"10px 12px", fontSize:13.5, color:"#c4aae8", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginBottom:12, textAlign:"center" },
   dayCopyPicker: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:8, padding:"10px", margin:"6px 0 4px" },
   dayCopyApplyBtn: { marginTop:8, width:"100%", background:"linear-gradient(135deg,#c8a878,#a07848)", border:"none", borderRadius:7, padding:"7px", fontSize:12, color:"#1c1712", fontWeight:700, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
 
@@ -3384,6 +3446,8 @@ const css = `
   .grocery-fab:hover { transform: scale(1.06); }
   .save-error-retry:hover { opacity: 0.9; }
   .save-error-dismiss:hover { color: #f4c4b4 !important; }
+  .day-clear-btn:hover { border-color: #e07a5f !important; color: #e07a5f !important; }
+  .create-recipe-btn:hover { border-color: #6a4a9a !important; background: #261e3e !important; }
   .grocery-fab:active { transform: scale(0.96); }
   @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
