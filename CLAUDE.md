@@ -22,7 +22,8 @@
 - `isLoadingRef` + `hasLoadedRef` guards prevent syncing before first load completes
 - `syncExtrasLockRef` mutex prevents concurrent DELETE+INSERT races on extras
 - `visibilitychange` throttled to once per 5s via `lastVisibilityLoadRef`
-- `loadAll` bails early if `isLoadingRef.current` is true (concurrent load guard)
+- `loadAll(opts)` bails early if `isLoadingRef.current` is true (concurrent load guard). `opts.recipes:false` skips the recipe fetch (polls do this — recipes change rarely + carry base64 photos; refetched on mount/visibility via `recipesLoadedRef`). `opts.silent` skips the "syncing" indicator (background polls). It builds all next-values, computes a JSON `sig`, and **skips every `setState` when `sig` matches `lastPayloadSigRef`** — so a no-op poll causes zero re-renders. The 10s poll is paused while `document.hidden`.
+- Meals sync per-cell (diff vs `lastSyncedWeekRef`), not whole-week, so concurrent edits to different cells don't clobber. `pendingMealsRef` reconciles in `loadAll` like lists. Extras use a short post-edit guard (`extrasDirtyRef`) instead.
 - `viewedWeekStart` drives which week is loaded; `viewedWeekStartRef` keeps it current for async callbacks
 - `nextWeekMeals` loaded alongside current week to compute cross-week thaw reminders; `prevWeekMeals` (week before viewed) loaded too, used by Auto-Fill to avoid repeating last week's recipes
 - `weatherData` fetched from Open-Meteo (no API key); location stored in localStorage as `mealplanner_loc`

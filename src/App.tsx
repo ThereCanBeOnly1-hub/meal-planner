@@ -527,6 +527,7 @@ export default function App() {
   const pendingMealsRef = useRef(new Map()); // `ws::day::slot` -> entry of in-flight meal writes
   const lastSyncedWeekRef = useRef(null);    // baseline week to diff against for per-cell sync
   const extrasDirtyRef = useRef({ ws: null, ts: 0 }); // recent local extras edit, to guard against poll clobber
+  const lastPayloadSigRef = useRef(""); // signature of last applied load, to skip no-op re-renders
   const syncExtrasLockRef = useRef(false);
   const lastVisibilityLoadRef = useRef(0);
   const mealTimer = useRef(null);
@@ -622,7 +623,7 @@ export default function App() {
   // photos); recipes refresh on mount + when the tab regains focus.
   useEffect(() => {
     if (!isConfigured) return;
-    const id = setInterval(() => { if (!document.hidden) loadAll({ recipes: false }); }, 10000);
+    const id = setInterval(() => { if (!document.hidden) loadAll({ recipes: false, silent: true }); }, 10000);
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
       const now = Date.now();
@@ -719,7 +720,7 @@ export default function App() {
     const wantRecipes = opts.recipes !== false || !recipesLoadedRef.current;
     try {
       isLoadingRef.current = true;
-      setSyncStatus("syncing");
+      if (!opts.silent) setSyncStatus("syncing"); // background polls don't flash the indicator
       const ws = viewedWeekStartRef.current;
 
       const nextWs = addWeeks(ws, 1);
@@ -750,29 +751,20 @@ export default function App() {
         if (pws === ws && mergedWeek[day]?.[slot] !== undefined) mergedWeek[day][slot] = entry;
       });
       lastSyncedWeekRef.current = mergedWeek; // baseline so the sync effect sees no spurious diff
-      setWeek(mergedWeek);
-      setNextWeekMeals(parseWeekRows(nextMealsRows));
-      setPrevWeekMeals(parseWeekRows(prevMealsRows));
+      const nextNext = parseWeekRows(nextMealsRows);
+      const nextPrev = parseWeekRows(prevMealsRows);
 
-      if (recipeRows) {
-        setRecipes(recipeRows.map(r => ({
-          id: r.id, name: r.name, description: r.description || "",
-          url: r.url || "", photo: r.photo || "", notes: r.notes || "",
-          prepTime: r.prep_time || "", cookTime: r.cook_time || "",
-          baseServings: r.base_servings || 4,
-          mealTypes: r.meal_types || [], dietTags: r.diet_tags || [], cuisineTags: r.cuisine_tags || [],
-          ingredients: r.ingredients || [], steps: r.steps || [],
-        })));
-        recipesLoadedRef.current = true;
-      }
+      const mappedRecipes = recipeRows ? recipeRows.map(r => ({
+        id: r.id, name: r.name, description: r.description || "",
+        url: r.url || "", photo: r.photo || "", notes: r.notes || "",
+        prepTime: r.prep_time || "", cookTime: r.cook_time || "",
+        baseServings: r.base_servings || 4,
+        mealTypes: r.meal_types || [], dietTags: r.diet_tags || [], cuisineTags: r.cuisine_tags || [],
+        ingredients: r.ingredients || [], steps: r.steps || [],
+      })) : null;
 
-      // Skip overwriting extras if they were just edited locally (covers the
-      // syncExtras delete-then-insert gap and the optimistic window).
-      const ed = extrasDirtyRef.current;
-      if (!(ed.ws === ws && Date.now() - ed.ts < 4000)) {
-        setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
-        setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
-      }
+      const serverSnacks = extrasRows.filter(e => e.type === "snack").map(e => e.name);
+      const serverDesserts = extrasRows.filter(e => e.type === "dessert").map(e => e.name);
 
       // Nest list items under their lists; ensure the grocery singleton exists.
       const itemsByList = {};
@@ -811,17 +803,32 @@ export default function App() {
           return changed ? { ...l, items } : l;
         });
       }
-
       // Grocery always pinned first, then by position/creation order.
       builtLists.sort((a, b) => (a.type === "grocery" ? -1 : b.type === "grocery" ? 1 : (a.position ?? 0) - (b.position ?? 0)));
-      setLists(builtLists);
 
-      const customTagsRow = settingsRows.find(r => r.key === "custom_tags");
-      if (customTagsRow && customTagsRow.value) setCustomTags(prev => ({ ...prev, ...customTagsRow.value }));
-      const catsRow = settingsRows.find(r => r.key === "ingredient_categories");
-      if (catsRow && catsRow.value) setIngredientCats(catsRow.value);
-      const layoutRow = settingsRows.find(r => r.key === "store_layout");
-      if (layoutRow && Array.isArray(layoutRow.value) && layoutRow.value.length) setStoreLayout(layoutRow.value);
+      const customTagsVal = settingsRows.find(r => r.key === "custom_tags")?.value || null;
+      const catsVal = settingsRows.find(r => r.key === "ingredient_categories")?.value || null;
+      const layoutVal = settingsRows.find(r => r.key === "store_layout")?.value || null;
+
+      // Skip all setState when nothing changed since the last load (avoids a
+      // full re-render on every poll). Recipes fall back to the current ref when
+      // not fetched, so skipping their fetch doesn't register as a change.
+      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, mappedRecipes ?? recipesRef.current]);
+      if (sig === lastPayloadSigRef.current) { hasLoadedRef.current = true; setSyncStatus("synced"); return; }
+      lastPayloadSigRef.current = sig;
+
+      setWeek(mergedWeek);
+      setNextWeekMeals(nextNext);
+      setPrevWeekMeals(nextPrev);
+      if (mappedRecipes) { setRecipes(mappedRecipes); recipesLoadedRef.current = true; }
+      // Skip overwriting extras if they were just edited locally (covers the
+      // syncExtras delete-then-insert gap and the optimistic window).
+      const ed = extrasDirtyRef.current;
+      if (!(ed.ws === ws && Date.now() - ed.ts < 4000)) { setSnacks(serverSnacks); setDesserts(serverDesserts); }
+      setLists(builtLists);
+      if (customTagsVal) setCustomTags(prev => ({ ...prev, ...customTagsVal }));
+      if (catsVal) setIngredientCats(catsVal);
+      if (Array.isArray(layoutVal) && layoutVal.length) setStoreLayout(layoutVal);
 
       hasLoadedRef.current = true;
       setSyncStatus("synced");
