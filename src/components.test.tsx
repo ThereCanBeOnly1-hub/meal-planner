@@ -93,6 +93,20 @@ describe("ListDetail", () => {
     fireEvent.click(container.querySelector(".list-item-del"));
     expect(onDeleteItem).toHaveBeenCalledWith("L1", "it1");
   });
+
+  it("delete-by-recipe removes only the selected recipe's ingredients", () => {
+    const onRemoveRecipes = vi.fn();
+    const grocery = { id: "grocery", name: "Grocery", type: "grocery", icon: "🛒", items: [
+      { id: "a", text: "Onion", checked: false, measures: [], sources: [{ id: "r1", name: "Tacos" }] },
+      { id: "b", text: "Milk", checked: false, measures: [], sources: [{ id: "r2", name: "Soup" }] },
+    ] };
+    renderDetail(grocery, { onRemoveRecipes });
+    fireEvent.click(screen.getByText("⋯"));                       // open menu
+    fireEvent.click(screen.getByText("📖 Delete by recipe"));     // open modal
+    fireEvent.click(screen.getByText("Tacos"));                   // select Tacos
+    fireEvent.click(screen.getByText(/Remove 1/));                // confirm
+    expect(onRemoveRecipes).toHaveBeenCalledWith(["r1"]);
+  });
 });
 
 // ─── ListItemsList grouping (manual vs recipe-sourced) ──────────────────────────

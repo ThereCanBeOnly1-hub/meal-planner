@@ -1073,19 +1073,22 @@ export default function App() {
     const grocery = lists.find(l => l.type === "grocery");
     return grocery ? grocery.items.filter(it => (it.sources || []).some(s => s.id === recipeId)).length : 0;
   };
-  // Undo a recipe's contribution: delete items only it added; for items shared
-  // with other recipes, just drop this recipe from their sources (keep the item).
-  const removeRecipeFromGrocery = (recipeId) => {
+  // Undo one or more recipes' contributions: delete items added only by those
+  // recipes; for items shared with other recipes, keep the item and just drop
+  // the selected recipes from its sources.
+  const removeRecipesFromGrocery = (recipeIds) => {
     const grocery = lists.find(l => l.type === "grocery");
-    if (!grocery) return { removed: 0, kept: 0 };
+    if (!grocery || !recipeIds || !recipeIds.length) return { removed: 0, kept: 0 };
+    const idSet = new Set(recipeIds);
     let removed = 0, kept = 0;
     const delIds = [], upRows = [], upIds = [];
     const nextItems = [];
     grocery.items.forEach(it => {
       const srcs = it.sources || [];
-      if (!srcs.some(s => s.id === recipeId)) { nextItems.push(it); return; }
-      if (srcs.length <= 1) { delIds.push(it.id); removed++; }
-      else { const nit = { ...it, sources: srcs.filter(s => s.id !== recipeId) }; nextItems.push(nit); upRows.push(listItemToRow(nit, grocery.id)); upIds.push(nit.id); kept++; }
+      const remaining = srcs.filter(s => !idSet.has(s.id));
+      if (remaining.length === srcs.length) { nextItems.push(it); return; } // unaffected (incl. manual)
+      if (remaining.length === 0) { delIds.push(it.id); removed++; }
+      else { const nit = { ...it, sources: remaining }; nextItems.push(nit); upRows.push(listItemToRow(nit, grocery.id)); upIds.push(nit.id); kept++; }
     });
     if (!delIds.length && !upRows.length) return { removed: 0, kept: 0 };
     setLists(prev => prev.map(l => l.id === grocery.id ? { ...l, items: nextItems } : l));
@@ -1095,6 +1098,7 @@ export default function App() {
     if (upRows.length) syncWrite("Couldn't update grocery", () => sb.upsert("list_items", upRows, "id"), upIds);
     return { removed, kept };
   };
+  const removeRecipeFromGrocery = (recipeId) => removeRecipesFromGrocery([recipeId]);
   // Manual quantity override on a grocery item.
   const setItemQty = (listId, itemId, text) => {
     const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
@@ -1199,7 +1203,7 @@ export default function App() {
             onOpen={(id) => navigate("lists", id ? { listId: id } : null)}
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
-            onSetItemQty={setItemQty} onShopping={openShopping} />
+            onSetItemQty={setItemQty} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping} />
         )}
       </div>
       <nav style={s.bottomNav}>
@@ -2897,12 +2901,12 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditabl
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onShopping }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onShopping }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
-      onSetItemQty={onSetItemQty} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
+      onSetItemQty={onSetItemQty} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
   }
   return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} />;
 }
@@ -2975,15 +2979,38 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList }) {
   );
 }
 
-function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onUpdateList, onDeleteList, onShopping }) {
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onUpdateList, onDeleteList, onShopping }) {
   const [input, setInput] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(list.name);
+  const [dbrOpen, setDbrOpen] = useState(false);       // "delete by recipe" modal
+  const [dbrSelected, setDbrSelected] = useState(() => new Set());
   const isGrocery = list.type === "grocery";
 
   const checked = list.items.filter(i => i.checked);
   const hasChecked = checked.length > 0;
+
+  // Distinct recipes that contributed items to this (grocery) list, with counts.
+  const recipeSources = (() => {
+    const map = new Map();
+    list.items.forEach(it => (it.sources || []).forEach(sr => {
+      const e = map.get(sr.id) || { id: sr.id, name: sr.name, count: 0 };
+      e.count++; map.set(sr.id, e);
+    }));
+    return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
+  })();
+
+  useEffect(() => {
+    const onPop = () => { if (dbrOpen) setDbrOpen(false); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [dbrOpen]);
+
+  const openDbr = () => { setDbrSelected(new Set()); setDbrOpen(true); setMenuOpen(false); history.pushState({ overlay: "dbr" }, ""); };
+  const closeDbr = () => { setDbrOpen(false); history.back(); };
+  const toggleDbr = (id) => setDbrSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const confirmDbr = () => { if (dbrSelected.size) onRemoveRecipes([...dbrSelected]); setDbrOpen(false); history.back(); };
 
   const submit = () => { const t = input.trim(); if (!t) return; onAddItem(list.id, t); setInput(""); };
   const saveName = () => { const n = nameDraft.trim(); if (n) onUpdateList(list.id, { name: n }); setRenaming(false); };
@@ -3000,6 +3027,7 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
               <div style={s.listMenu}>
                 {!isGrocery && <button style={s.listMenuItem} className="list-menu-item" onClick={() => { setRenaming(true); setNameDraft(list.name); setMenuOpen(false); }}>✏️ Rename</button>}
                 <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (hasChecked) onClearItems(list.id, true); setMenuOpen(false); }}>🧹 Delete checked</button>
+                {isGrocery && recipeSources.length > 0 && <button style={s.listMenuItem} className="list-menu-item" onClick={openDbr}>📖 Delete by recipe</button>}
                 <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (list.items.length) onClearItems(list.id, false); setMenuOpen(false); }}>🗑 Delete all</button>
                 {!isGrocery && <button style={{...s.listMenuItem,color:"#e07a5f"}} className="list-menu-item" onClick={() => { onDeleteList(list.id); setMenuOpen(false); }}>Delete list</button>}
               </div>
@@ -3042,6 +3070,33 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
         )}
         <div style={{height:40}} />
       </div>
+
+      {dbrOpen && (
+        <div style={s.overlay} onClick={closeDbr}>
+          <div style={{...s.modal,maxWidth:360}} onClick={e=>e.stopPropagation()} className="modal-in">
+            <div style={s.modalHead}>
+              <div><div style={s.modalEyebrow}>🛒 Grocery</div><div style={s.modalTitle}>Delete by recipe</div></div>
+              <button style={s.modalClose} onClick={closeDbr}>✕</button>
+            </div>
+            <div style={s.dbrHint}>Check the recipes whose ingredients you want to remove from the list.</div>
+            <div style={s.dbrList}>
+              {recipeSources.map(r => (
+                <button key={r.id} style={{...s.dbrRow,...(dbrSelected.has(r.id)?s.dbrRowOn:{})}} onClick={() => toggleDbr(r.id)}>
+                  <span style={{...s.dbrCheck,...(dbrSelected.has(r.id)?s.dbrCheckOn:{})}}>{dbrSelected.has(r.id) ? "✓" : ""}</span>
+                  <span style={s.dbrName}>{r.name}</span>
+                  <span style={s.dbrCount}>{r.count}</span>
+                </button>
+              ))}
+            </div>
+            <div style={s.afActions}>
+              <button style={s.btnClear} onClick={closeDbr}>Cancel</button>
+              <button style={{...s.btnSave,...(dbrSelected.size?{background:"linear-gradient(135deg,#e07a5f,#c05040)"}:s.btnDisabled)}} onClick={()=>dbrSelected.size&&confirmDbr()}>
+                Remove {dbrSelected.size || ""}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3444,6 +3499,14 @@ const s = {
   listMenuBackdrop: { position:"fixed", inset:0, zIndex:40 },
   listMenu: { position:"absolute", top:"110%", right:0, background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:11, padding:6, minWidth:160, boxShadow:"0 14px 36px rgba(0,0,0,0.5)", zIndex:41, display:"flex", flexDirection:"column", gap:2 },
   listMenuItem: { background:"none", border:"none", textAlign:"left", padding:"9px 11px", borderRadius:7, fontSize:13.5, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
+  dbrHint: { fontSize:12.5, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginBottom:12, lineHeight:1.45 },
+  dbrList: { display:"flex", flexDirection:"column", gap:5, maxHeight:"50vh", overflowY:"auto" },
+  dbrRow: { display:"flex", alignItems:"center", gap:11, background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:9, padding:"10px 12px", cursor:"pointer", textAlign:"left", width:"100%" },
+  dbrRowOn: { borderColor:"#c8a878", background:"#241e16" },
+  dbrCheck: { width:22, height:22, borderRadius:6, border:"1.5px solid #4a3c2a", background:"#1c1712", color:"#1c1712", fontSize:13, fontWeight:800, flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
+  dbrCheckOn: { background:"#f4c97a", borderColor:"#f4c97a" },
+  dbrName: { flex:1, fontSize:14, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", minWidth:0, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  dbrCount: { fontSize:11.5, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", background:"#2a2018", borderRadius:8, padding:"1px 8px", flexShrink:0 },
   listMenuItemDim: { opacity:0.4 },
 
   // Grocery FAB + quick-drawer
