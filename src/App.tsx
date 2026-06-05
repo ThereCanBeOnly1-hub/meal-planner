@@ -499,6 +499,7 @@ export default function App() {
   const [lists, setLists] = useState([]);
   const [listView, setListView] = useState(null); // open list id or null
   const pendingListRef = useRef(new Map()); // in-flight list/item writes, kept so a poll can't clobber optimistic edits
+  const addGroceryBusyRef = useRef(false); // debounces rapid double "add to grocery"
   const [groceryOpen, setGroceryOpen] = useState(false);
   const groceryPopRef = useRef(false);
   const [ingredientCats, setIngredientCats] = useState({});
@@ -914,8 +915,11 @@ export default function App() {
   // items dedupe/aggregate against each other and existing recipe-sourced lines;
   // manual items are never merged into. Returns {added, merged}.
   const addRecipesToGrocery = (recipesToAdd) => {
+    if (addGroceryBusyRef.current) return { added: 0, merged: 0 }; // ignore rapid double-tap
     const grocery = lists.find(l => l.type === "grocery");
     if (!grocery) return { added: 0, merged: 0 };
+    addGroceryBusyRef.current = true;
+    setTimeout(() => { addGroceryBusyRef.current = false; }, 700);
     const candByKey = new Map();
     recipesToAdd.forEach(rec => (rec.ingredients || []).forEach(ing => {
       const name = (ing.name || "").trim(); if (!name) return;
