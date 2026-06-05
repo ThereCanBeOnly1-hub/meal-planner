@@ -78,8 +78,9 @@
 ## Testing
 
 - Unit tests with Vitest: `npm test` (run once) / `npm run test:watch`. Config in `vitest.config.ts` (separate from vite.config so it can't affect the build; environment `node`).
-- Pure helpers are exported from `App.tsx` via a single `export { … }` block (no logic moved; tree-shaken out of the app bundle) and tested in `src/App.test.ts`. When adding/altering a pure helper (parsing, scaling, sync primitives like `mealCellEq`, grocery/unit logic, auto-fill engine), add a test.
-- `src/**/*.test.ts` is excluded from `tsconfig.app.json` so `tsc -b` (the build) ignores tests.
+- Tier 1 (unit): pure helpers are exported from `App.tsx` via a single `export { … }` block (no logic moved; tree-shaken out of the app bundle) and tested in `src/App.test.ts` (node env). When adding/altering a pure helper (parsing, scaling, sync primitives like `mealCellEq`, grocery/unit logic, auto-fill engine), add a test.
+- Tier 2 (component): prop-driven components (`RecipesView`, `TagPicker`, `ListDetail`, `ListItemsList`, `ListIndex`, `ShoppingMode`) are exported the same way and tested in `src/components.test.tsx` (`// @vitest-environment jsdom`, React Testing Library — render with fake props, fire events, assert callbacks). Covers navigation/UI flows like New→Cancel, custom-tag add/delete, list item add/check/delete.
+- `src/**/*.test.{ts,tsx}` is excluded from `tsconfig.app.json` so `tsc -b` (the build) ignores tests.
 
 ## Deployment
 

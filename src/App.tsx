@@ -503,6 +503,12 @@ export {
   mealRow, mealCellEq,
 };
 
+// Prop-driven components exported for component tests (see src/components.test.tsx).
+// Function declarations hoist, so this works before their definitions below.
+export {
+  RecipesView, TagPicker, ListDetail, ListItemsList, ListIndex, ShoppingMode,
+};
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("planner");
