@@ -1006,7 +1006,17 @@ export default function App() {
   const addWeekToGrocery = () => addRecipesToGrocery(weekRecipeList());
 
   // ─── Categorization (Shopping Mode) ──────────────────────────────────────────
-  const saveIngredientCats = (next) => { if (isConfigured) sb.upsert("app_settings", [{ key: "ingredient_categories", value: next }], "key").catch(e => console.error("Cat cache save:", e)); };
+  // Merge with the latest server cache before writing so two devices
+  // categorizing at once don't drop each other's entries (ours wins on conflict).
+  const saveIngredientCats = async (next) => {
+    if (!isConfigured) return;
+    try {
+      const rows = await sb.get("app_settings", "?key=eq.ingredient_categories").catch(() => []);
+      const merged = { ...(rows[0]?.value || {}), ...next };
+      await sb.upsert("app_settings", [{ key: "ingredient_categories", value: merged }], "key");
+      setIngredientCats(merged);
+    } catch (e) { console.error("Cat cache save:", e); }
+  };
 
   // Categorize any grocery items whose ingredient isn't cached yet (one batched call).
   const categorizeGroceryItems = async () => {
