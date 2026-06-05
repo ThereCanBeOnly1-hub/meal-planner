@@ -491,6 +491,18 @@ const weekStart = () => {
   return mon.toISOString().split("T")[0];
 };
 
+// Pure helpers exported for unit tests (see src/App.test.ts). No runtime effect
+// on the app; the entry point only uses the default-exported App component.
+export {
+  parseMinutes, formatMinutes,
+  parseQty, formatQty, scaleAmount,
+  normalizeImported, recipeToRow,
+  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures,
+  afSample, afLayBlocks, afPlanKey, generateSlotPlan, generateWeekPlan,
+  layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart,
+  mealRow, mealCellEq,
+};
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("planner");

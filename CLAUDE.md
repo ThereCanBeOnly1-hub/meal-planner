@@ -75,6 +75,12 @@
 - `api/categorize.ts` (Vercel, reuses `ANTHROPIC_API_KEY`): batched Claude call, takes uncached names + current `storeLayout` sections, returns name→sectionId (enum-constrained). Called by `categorizeGroceryItems` only for cache misses, on entering Shopping Mode. Low-balance error surfaces in the Shopping Mode banner.
 - `setItemAisle` overrides + remembers an ingredient's aisle in the cache.
 
+## Testing
+
+- Unit tests with Vitest: `npm test` (run once) / `npm run test:watch`. Config in `vitest.config.ts` (separate from vite.config so it can't affect the build; environment `node`).
+- Pure helpers are exported from `App.tsx` via a single `export { … }` block (no logic moved; tree-shaken out of the app bundle) and tested in `src/App.test.ts`. When adding/altering a pure helper (parsing, scaling, sync primitives like `mealCellEq`, grocery/unit logic, auto-fill engine), add a test.
+- `src/**/*.test.ts` is excluded from `tsconfig.app.json` so `tsc -b` (the build) ignores tests.
+
 ## Deployment
 
 - Git push to main → auto-deploys via Vercel
