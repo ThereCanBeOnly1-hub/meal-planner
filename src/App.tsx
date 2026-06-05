@@ -526,6 +526,7 @@ export default function App() {
   const recipesLoadedRef = useRef(false);
   const pendingMealsRef = useRef(new Map()); // `ws::day::slot` -> entry of in-flight meal writes
   const lastSyncedWeekRef = useRef(null);    // baseline week to diff against for per-cell sync
+  const extrasDirtyRef = useRef({ ws: null, ts: 0 }); // recent local extras edit, to guard against poll clobber
   const syncExtrasLockRef = useRef(false);
   const lastVisibilityLoadRef = useRef(0);
   const mealTimer = useRef(null);
@@ -661,6 +662,7 @@ export default function App() {
   // Sync extras to DB when snacks/desserts change (debounced 300ms)
   useEffect(() => {
     if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
+    extrasDirtyRef.current = { ws: viewedWeekStartRef.current, ts: Date.now() }; // guard loadAll from clobbering
     clearTimeout(extrasTimer.current);
     extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 300);
   }, [snacks, desserts]);
@@ -764,8 +766,13 @@ export default function App() {
         recipesLoadedRef.current = true;
       }
 
-      setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
-      setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
+      // Skip overwriting extras if they were just edited locally (covers the
+      // syncExtras delete-then-insert gap and the optimistic window).
+      const ed = extrasDirtyRef.current;
+      if (!(ed.ws === ws && Date.now() - ed.ts < 4000)) {
+        setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
+        setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
+      }
 
       // Nest list items under their lists; ensure the grocery singleton exists.
       const itemsByList = {};
