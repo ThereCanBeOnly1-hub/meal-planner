@@ -526,6 +526,7 @@ export default function App() {
   const recipesLoadedRef = useRef(false);
   const pendingMealsRef = useRef(new Map()); // `ws::day::slot` -> entry of in-flight meal writes
   const lastSyncedWeekRef = useRef(null);    // baseline week to diff against for per-cell sync
+  const lastSyncedWsRef = useRef(null);      // which week_start the baseline belongs to
   const extrasDirtyRef = useRef({ ws: null, ts: 0 }); // recent local extras edit, to guard against poll clobber
   const lastPayloadSigRef = useRef(""); // signature of last applied load, to skip no-op re-renders
   const syncExtrasLockRef = useRef(false);
@@ -587,6 +588,7 @@ export default function App() {
   useEffect(() => {
     if (!isConfigured) return;
     hasLoadedRef.current = false;
+    lastPayloadSigRef.current = "";        // force loadAll to apply the new week's data
     setWeek(initialWeek());
     setNextWeekMeals(initialWeek());
     setPrevWeekMeals(initialWeek());
@@ -635,29 +637,30 @@ export default function App() {
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
 
-  // Sync meals to DB when week changes (debounced 300ms). Writes ONLY the cells
-  // that differ from the last-synced baseline, so concurrent edits to other
-  // cells (by the other user) aren't overwritten.
+  // Sync meals to DB when the week changes. Writes immediately (no shared timer)
+  // and ONLY the cells that differ from the baseline FOR THIS WEEK — so it can
+  // never write one week's data onto another, never loses an edit, and doesn't
+  // overwrite the other user's edits to other cells.
   useEffect(() => {
     if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
-    clearTimeout(mealTimer.current);
-    mealTimer.current = setTimeout(() => {
-      const ws = viewedWeekStartRef.current;
-      const prev = lastSyncedWeekRef.current;
-      const cells = [];
-      DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
-        const cur = week[day][slot];
-        if (!mealCellEq(cur, prev?.[day]?.[slot])) cells.push({ day, slot, entry: cur });
-      }));
-      lastSyncedWeekRef.current = week;
-      if (!cells.length) return;
-      cells.forEach(({ day, slot, entry }) => pendingMealsRef.current.set(`${ws}::${day}::${slot}`, entry));
-      const settle = () => setTimeout(() => cells.forEach(({ day, slot }) => pendingMealsRef.current.delete(`${ws}::${day}::${slot}`)), 2500);
-      sb.upsert("meals", cells.map(({ day, slot, entry }) => mealRow(ws, day, slot, entry)), "week_start,day,slot")
-        .then(() => setSyncStatus("synced"))
-        .catch(err => { console.error("Sync meals:", err); setSyncStatus("error"); })
-        .finally(settle);
-    }, 300);
+    const ws = viewedWeekStartRef.current;
+    // If the baseline isn't for this week yet (just loaded/navigated), adopt the
+    // current week as the baseline and don't write.
+    if (lastSyncedWsRef.current !== ws) { lastSyncedWeekRef.current = week; lastSyncedWsRef.current = ws; return; }
+    const prev = lastSyncedWeekRef.current;
+    const cells = [];
+    DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
+      const cur = week[day][slot];
+      if (!mealCellEq(cur, prev?.[day]?.[slot])) cells.push({ day, slot, entry: cur });
+    }));
+    lastSyncedWeekRef.current = week;
+    if (!cells.length) return;
+    cells.forEach(({ day, slot, entry }) => pendingMealsRef.current.set(`${ws}::${day}::${slot}`, entry));
+    const settle = () => setTimeout(() => cells.forEach(({ day, slot }) => pendingMealsRef.current.delete(`${ws}::${day}::${slot}`)), 2500);
+    sb.upsert("meals", cells.map(({ day, slot, entry }) => mealRow(ws, day, slot, entry)), "week_start,day,slot")
+      .then(() => setSyncStatus("synced"))
+      .catch(err => { console.error("Sync meals:", err); setSyncStatus("error"); })
+      .finally(settle);
   }, [week]);
 
   // Sync extras to DB when snacks/desserts change (debounced 300ms)
@@ -751,6 +754,7 @@ export default function App() {
         if (pws === ws && mergedWeek[day]?.[slot] !== undefined) mergedWeek[day][slot] = entry;
       });
       lastSyncedWeekRef.current = mergedWeek; // baseline so the sync effect sees no spurious diff
+      lastSyncedWsRef.current = ws;
       const nextNext = parseWeekRows(nextMealsRows);
       const nextPrev = parseWeekRows(prevMealsRows);
 
