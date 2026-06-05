@@ -516,6 +516,7 @@ export default function App() {
   const [weatherData, setWeatherData] = useState({});
   const isLoadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
+  const recipesLoadedRef = useRef(false);
   const syncExtrasLockRef = useRef(false);
   const lastVisibilityLoadRef = useRef(0);
   const mealTimer = useRef(null);
@@ -581,7 +582,7 @@ export default function App() {
     setLists([]);
     setSnacks([]);
     setDesserts([]);
-    loadAll();
+    loadAll({ recipes: false }); // recipes are global; fetched once (or on focus), not per week
   }, [viewedWeekStart]);
 
   // One-time geolocation prompt
@@ -606,16 +607,18 @@ export default function App() {
       .then(setWeatherData).catch(() => setWeatherData({}));
   }, [location, viewedWeekStart]);
 
-  // Background poll every 10s + refresh on tab focus
+  // Background poll every 10s (paused while tab hidden) + refresh on tab focus.
+  // Polls skip the recipe fetch (recipes change rarely and carry big base64
+  // photos); recipes refresh on mount + when the tab regains focus.
   useEffect(() => {
     if (!isConfigured) return;
-    const id = setInterval(loadAll, 10000);
+    const id = setInterval(() => { if (!document.hidden) loadAll({ recipes: false }); }, 10000);
     const onVisible = () => {
       if (document.visibilityState !== "visible") return;
       const now = Date.now();
       if (now - lastVisibilityLoadRef.current < 5000) return;
       lastVisibilityLoadRef.current = now;
-      loadAll();
+      loadAll({ recipes: true });
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
@@ -680,8 +683,11 @@ export default function App() {
     });
   };
 
-  const loadAll = async () => {
+  const loadAll = async (opts = {}) => {
     if (isLoadingRef.current) return;
+    // Fetch recipes on the first load and when explicitly requested; polls skip
+    // them (rarely change, heavy base64 photos).
+    const wantRecipes = opts.recipes !== false || !recipesLoadedRef.current;
     try {
       isLoadingRef.current = true;
       setSyncStatus("syncing");
@@ -689,15 +695,15 @@ export default function App() {
 
       const nextWs = addWeeks(ws, 1);
       const prevWs = addWeeks(ws, -1);
-      const [mealsRows, nextMealsRows, prevMealsRows, recipeRows, extrasRows, listRows, listItemRows] = await Promise.all([
+      const [mealsRows, nextMealsRows, prevMealsRows, extrasRows, listRows, listItemRows] = await Promise.all([
         sb.get("meals", `?week_start=eq.${ws}`),
         sb.get("meals", `?week_start=eq.${nextWs}`),
         sb.get("meals", `?week_start=eq.${prevWs}`),
-        sb.get("recipes", "?order=created_at.asc"),
         sb.get("extras", `?week_start=eq.${ws}&order=created_at.asc`),
         sb.get("lists", "?order=created_at.asc").catch(() => []),
         sb.get("list_items", "?order=created_at.asc").catch(() => []),
       ]);
+      const recipeRows = wantRecipes ? await sb.get("recipes", "?order=created_at.asc") : null;
       const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories,store_layout)").catch(() => []);
 
       const parseWeekRows = (rows) => {
@@ -712,14 +718,17 @@ export default function App() {
       setNextWeekMeals(parseWeekRows(nextMealsRows));
       setPrevWeekMeals(parseWeekRows(prevMealsRows));
 
-      setRecipes(recipeRows.map(r => ({
-        id: r.id, name: r.name, description: r.description || "",
-        url: r.url || "", photo: r.photo || "", notes: r.notes || "",
-        prepTime: r.prep_time || "", cookTime: r.cook_time || "",
-        baseServings: r.base_servings || 4,
-        mealTypes: r.meal_types || [], dietTags: r.diet_tags || [], cuisineTags: r.cuisine_tags || [],
-        ingredients: r.ingredients || [], steps: r.steps || [],
-      })));
+      if (recipeRows) {
+        setRecipes(recipeRows.map(r => ({
+          id: r.id, name: r.name, description: r.description || "",
+          url: r.url || "", photo: r.photo || "", notes: r.notes || "",
+          prepTime: r.prep_time || "", cookTime: r.cook_time || "",
+          baseServings: r.base_servings || 4,
+          mealTypes: r.meal_types || [], dietTags: r.diet_tags || [], cuisineTags: r.cuisine_tags || [],
+          ingredients: r.ingredients || [], steps: r.steps || [],
+        })));
+        recipesLoadedRef.current = true;
+      }
 
       setSnacks(extrasRows.filter(e => e.type === "snack").map(e => e.name));
       setDesserts(extrasRows.filter(e => e.type === "dessert").map(e => e.name));
