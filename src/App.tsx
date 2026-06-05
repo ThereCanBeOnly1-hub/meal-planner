@@ -1282,6 +1282,7 @@ export default function App() {
 function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onOpenFull, weekRecipeCount, onAddWeek }) {
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
   const items = list?.items || [];
   const checked = items.filter(i => i.checked);
   const submit = () => { const t = input.trim(); if (!t || !list) return; onAddItem(list.id, t); setInput(""); };
@@ -1319,10 +1320,15 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
         </div>
 
         <div style={s.groceryDrawerFoot}>
-          {checked.length > 0 && <button style={s.btnClear} onClick={() => onClearItems(list.id, true)}>Delete checked</button>}
+          {checked.length > 0 && <button style={s.btnClear} onClick={() => setConfirmDel(true)}>Delete checked</button>}
           <button style={{...s.btnClear,marginLeft:"auto"}} onClick={onOpenFull}>Open full list →</button>
         </div>
       </div>
+
+      {confirmDel && (
+        <ConfirmModal icon="🧹" title={`Delete ${checked.length} checked item${checked.length>1?"s":""}?`} body="This removes the checked items from the grocery list."
+          confirmLabel="Delete checked" onCancel={() => setConfirmDel(false)} onConfirm={() => { onClearItems(list.id, true); setConfirmDel(false); }} />
+      )}
     </div>
   );
 }
@@ -2278,6 +2284,7 @@ function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, onDelet
   const [adding, setAdding] = useState(false);
   const [managing, setManaging] = useState(false);
   const [input, setInput] = useState("");
+  const [pendingDelete, setPendingDelete] = useState(null);
   const customList = (customTagsList||[]).filter(t => !defaultTags.includes(t));
   const allTags = [...defaultTags, ...customList];
   const addCustom = () => {
@@ -2286,10 +2293,10 @@ function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, onDelet
     if (!selected.includes(v)) onToggle(v);
     setInput(""); setAdding(false);
   };
-  const deleteTag = (t) => {
-    if (!window.confirm(`Remove the "${t}" tag?\n\nIt will be deleted from this and any other recipes using it.`)) return;
+  const doDeleteTag = (t) => {
     if (selected.includes(t)) onToggle(t);   // drop it from the recipe being edited too
     onDeleteCustomTag(t);
+    setPendingDelete(null);
   };
   const canManage = onDeleteCustomTag && customList.length > 0;
   return (
@@ -2304,7 +2311,7 @@ function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, onDelet
         {allTags.map(t => {
           const isCustom = customList.includes(t);
           if (managing && isCustom) {
-            return <button key={t} style={{...s.tagPickerChip,...s.tagDeleteChip}} className="tag-delete-chip" onClick={()=>deleteTag(t)}>{t} ✕</button>;
+            return <button key={t} style={{...s.tagPickerChip,...s.tagDeleteChip}} className="tag-delete-chip" onClick={()=>setPendingDelete(t)}>{t} ✕</button>;
           }
           return <button key={t} disabled={managing} style={{...s.tagPickerChip,...(selected.includes(t)?chipActiveStyle:{}),...(managing?s.tagChipDim:{})}} className="tag-chip" onClick={()=>!managing&&onToggle(t)}>{t}</button>;
         })}
@@ -2319,6 +2326,10 @@ function TagPicker({ label, defaultTags, customTagsList, onAddCustomTag, onDelet
           <button style={s.btnSave} onClick={addCustom}>Add</button>
           <button style={s.btnClear} onClick={()=>{setAdding(false);setInput("");}}>✕</button>
         </div>
+      )}
+      {pendingDelete && (
+        <ConfirmModal title={`Remove the "${pendingDelete}" tag?`} body="It will be deleted from this and any other recipes using it."
+          confirmLabel="Remove tag" onCancel={() => setPendingDelete(null)} onConfirm={() => doDeleteTag(pendingDelete)} />
       )}
     </div>
   );
@@ -2855,6 +2866,23 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
   );
 }
 
+// Reusable styled confirm dialog (matches Clear Week/Day). Presentational only.
+function ConfirmModal({ icon, title, body, confirmLabel, onConfirm, onCancel }) {
+  return (
+    <div style={s.overlay} onClick={onCancel}>
+      <div style={{...s.modal,maxWidth:320,textAlign:"center"}} onClick={e=>e.stopPropagation()} className="modal-in">
+        <div style={{fontSize:32,marginBottom:12}}>{icon || "🗑"}</div>
+        <div style={{...s.modalTitle,fontSize:18,marginBottom:8}}>{title}</div>
+        {body && <div style={{fontSize:13,color:"#9a7f60",marginBottom:24,fontFamily:"'DM Sans',sans-serif",lineHeight:1.45}}>{body}</div>}
+        <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+          <button style={s.btnClear} onClick={onCancel}>Cancel</button>
+          <button style={{...s.btnSave,background:"linear-gradient(135deg,#e07a5f,#c05040)"}} onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Lists View ───────────────────────────────────────────────────────────────
 // Keys present in BOTH a manual and a recipe-sourced item (the "duplicate" case).
 const computeDupKeys = (items) => {
@@ -3023,6 +3051,7 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
   const [nameDraft, setNameDraft] = useState(list.name);
   const [dbrOpen, setDbrOpen] = useState(false);       // "delete by recipe" modal
   const [dbrSelected, setDbrSelected] = useState(() => new Set());
+  const [confirm, setConfirm] = useState(null);        // {icon,title,body,label,onYes} for destructive actions
   const isGrocery = list.type === "grocery";
 
   const checked = list.items.filter(i => i.checked);
@@ -3063,10 +3092,10 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
               <div style={s.listMenuBackdrop} onClick={() => setMenuOpen(false)} />
               <div style={s.listMenu}>
                 {!isGrocery && <button style={s.listMenuItem} className="list-menu-item" onClick={() => { setRenaming(true); setNameDraft(list.name); setMenuOpen(false); }}>✏️ Rename</button>}
-                <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (hasChecked) onClearItems(list.id, true); setMenuOpen(false); }}>🧹 Delete checked</button>
+                <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (!hasChecked) return; setMenuOpen(false); setConfirm({ icon:"🧹", title:`Delete ${checked.length} checked item${checked.length>1?"s":""}?`, body:"This removes the checked items from the list.", label:"Delete checked", onYes:() => onClearItems(list.id, true) }); }}>🧹 Delete checked</button>
                 {isGrocery && recipeSources.length > 0 && <button style={s.listMenuItem} className="list-menu-item" onClick={openDbr}>📖 Delete by recipe</button>}
-                <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (list.items.length) onClearItems(list.id, false); setMenuOpen(false); }}>🗑 Delete all</button>
-                {!isGrocery && <button style={{...s.listMenuItem,color:"#e07a5f"}} className="list-menu-item" onClick={() => { onDeleteList(list.id); setMenuOpen(false); }}>Delete list</button>}
+                <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (!list.items.length) return; setMenuOpen(false); setConfirm({ icon:"🗑", title:`Delete all ${list.items.length} items?`, body:`This empties ${list.name}. Can't be undone.`, label:"Delete all", onYes:() => onClearItems(list.id, false) }); }}>🗑 Delete all</button>
+                {!isGrocery && <button style={{...s.listMenuItem,color:"#e07a5f"}} className="list-menu-item" onClick={() => { setMenuOpen(false); setConfirm({ icon:"🗑", title:`Delete "${list.name}"?`, body:"This deletes the whole list and all its items. Can't be undone.", label:"Delete list", onYes:() => onDeleteList(list.id) }); }}>Delete list</button>}
               </div>
             </>
           )}
@@ -3107,6 +3136,11 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
         )}
         <div style={{height:40}} />
       </div>
+
+      {confirm && (
+        <ConfirmModal icon={confirm.icon} title={confirm.title} body={confirm.body} confirmLabel={confirm.label}
+          onCancel={() => setConfirm(null)} onConfirm={() => { confirm.onYes(); setConfirm(null); }} />
+      )}
 
       {dbrOpen && (
         <div style={s.overlay} onClick={closeDbr}>

@@ -58,10 +58,10 @@ describe("TagPicker", () => {
 
   it("deletes a custom tag (after confirm) but never a built-in one", () => {
     const onDeleteCustomTag = vi.fn();
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     renderPicker({ customTagsList: ["Keto"], onDeleteCustomTag });
     fireEvent.click(screen.getByText("Manage"));
-    fireEvent.click(screen.getByRole("button", { name: /Keto/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Keto/ })); // opens styled confirm
+    fireEvent.click(screen.getByText("Remove tag"));                // confirm
     expect(onDeleteCustomTag).toHaveBeenCalledWith("Keto");
     // built-in "Vegan" is not deletable — no delete affordance to click for it
   });
@@ -92,6 +92,18 @@ describe("ListDetail", () => {
     expect(onToggleItem).toHaveBeenCalledWith("L1", "it1");
     fireEvent.click(container.querySelector(".list-item-del"));
     expect(onDeleteItem).toHaveBeenCalledWith("L1", "it1");
+  });
+
+  it("Delete checked asks for confirmation before clearing", () => {
+    const onClearItems = vi.fn();
+    const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳",
+      items: [{ id: "x", text: "Socks", checked: true, measures: [], sources: [] }] };
+    renderDetail(list, { onClearItems });
+    fireEvent.click(screen.getByText("⋯"));
+    fireEvent.click(screen.getByText("🧹 Delete checked"));
+    expect(onClearItems).not.toHaveBeenCalled();      // not until confirmed
+    fireEvent.click(screen.getByText("Delete checked")); // confirm button in the modal
+    expect(onClearItems).toHaveBeenCalledWith("L1", true);
   });
 
   it("delete-by-recipe removes only the selected recipe's ingredients", () => {

@@ -39,6 +39,10 @@
 - Manual quantity edit: tap an item's qty (or "+ qty") on the grocery list/drawer to set it; `setItemQty` stores `parseQtyInput(text)` as the item's `measures` (overrides recipe quantities). Only enabled for grocery lists (`qtyEditable`).
 - Grocery auto-populate: `addRecipesToGrocery` (and `addRecipeToGrocery`/`addWeekToGrocery`) appends ingredients; recipe-sourced items dedupe/aggregate against each other and existing recipe-sourced lines by `groceryKey` (name sans prep notes), summing `measures` whose units match after `unitKey` canonicalization (UNIT_CANON maps full names/plurals/variants like pound/lbs→lb); displayed via `unitDisplay` as the short abbreviation. Manual items are never merged into. `computeDupKeys` flags items present as both manual and recipe-sourced ("dup" badge). Entry points: Recipe detail "Add to grocery", grocery drawer "Add this week's meals"
 
+## Confirmations
+
+- **Reusable `ConfirmModal`** (styled overlay) backs the destructive-action confirms in the lists area: Delete checked, Delete all, Delete list (ListDetail menu), Delete checked (grocery drawer), and custom-tag delete (TagPicker). Clear Week / Clear Day / Delete Recipe / Delete-by-recipe use their own equivalent styled modals. Every bulk/clear/delete action has a confirm; single-item removals (the ✕ on one meal/list-item/snack) intentionally don't, to avoid confirm-fatigue. When adding a destructive action, gate it behind `ConfirmModal`.
+
 ## Key components
 
 - **App**: top-level state, data fetching, sync
