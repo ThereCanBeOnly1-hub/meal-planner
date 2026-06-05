@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseMinutes, formatMinutes,
   parseQty, formatQty, scaleAmount,
-  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures,
+  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput,
   normalizeImported, addWeeks,
   mealCellEq, mealRow,
   afLayBlocks, generateSlotPlan, layoutPickerOrder,
@@ -115,6 +115,18 @@ describe("ingredientToMeasure / mergeMeasures / formatMeasures", () => {
   it("formats measures for display", () => {
     expect(formatMeasures([{ amount: 2, unit: "lb" }])).toBe("2 lb");
     expect(formatMeasures([{ amount: 1, unit: "cup" }, { amount: 200, unit: "g" }])).toBe("1 cup + 200 g");
+  });
+});
+
+describe("parseQtyInput (manual quantity edit)", () => {
+  it("parses amount + unit, plain numbers, and fractions", () => {
+    expect(parseQtyInput("2 lbs")).toEqual([{ amount: 2, unit: "lb" }]);
+    expect(parseQtyInput("1 1/2 cups")).toEqual([{ amount: 1.5, unit: "cup" }]);
+    expect(parseQtyInput("3")).toEqual([{ amount: 3, unit: "" }]);
+  });
+  it("keeps non-numeric quantities as text, and empty as none", () => {
+    expect(parseQtyInput("a dozen")).toEqual([{ text: "a dozen" }]);
+    expect(parseQtyInput("")).toEqual([]);
   });
 });
 

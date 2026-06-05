@@ -372,6 +372,19 @@ const mergeMeasures = (existing, incoming) => {
 };
 const formatMeasures = (measures) => (measures || []).map(m => m.amount != null ? `${formatQty(m.amount)}${m.unit ? ` ${unitDisplay(m.unit)}` : ""}` : m.text).filter(Boolean).join(" + ");
 
+// Parse a free-typed quantity ("2 lbs", "1 1/2 cups", "3", "a dozen") into a
+// measures array. Used for manual quantity edits on grocery items.
+const parseQtyInput = (str) => {
+  const s = String(str || "").trim();
+  if (!s) return [];
+  const m = s.match(/^([0-9./\s¼½¾⅓⅔⅛⅜⅝⅞]+?)\s*([a-zA-Z].*)?$/);
+  if (m) {
+    const n = parseQty((m[1] || "").trim());
+    if (n !== null) return [{ amount: n, unit: m[2] ? unitDisplay(m[2].trim()) : "" }];
+  }
+  return [{ text: s }];
+};
+
 // ─── Auto-Fill engine ─────────────────────────────────────────────────────────
 const AF_WEEKDAYS = DAYS.slice(0, 5); // Mon–Fri
 const AF_WEEKEND = DAYS.slice(5);     // Sat, Sun
@@ -497,7 +510,7 @@ export {
   parseMinutes, formatMinutes,
   parseQty, formatQty, scaleAmount,
   normalizeImported, recipeToRow,
-  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures,
+  normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput,
   afSample, afLayBlocks, afPlanKey, generateSlotPlan, generateWeekPlan,
   layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart,
   mealRow, mealCellEq,
@@ -1055,6 +1068,42 @@ export default function App() {
   };
   const addWeekToGrocery = () => addRecipesToGrocery(weekRecipeList());
 
+  // How many grocery items were contributed by a given recipe.
+  const groceryCountForRecipe = (recipeId) => {
+    const grocery = lists.find(l => l.type === "grocery");
+    return grocery ? grocery.items.filter(it => (it.sources || []).some(s => s.id === recipeId)).length : 0;
+  };
+  // Undo a recipe's contribution: delete items only it added; for items shared
+  // with other recipes, just drop this recipe from their sources (keep the item).
+  const removeRecipeFromGrocery = (recipeId) => {
+    const grocery = lists.find(l => l.type === "grocery");
+    if (!grocery) return { removed: 0, kept: 0 };
+    let removed = 0, kept = 0;
+    const delIds = [], upRows = [], upIds = [];
+    const nextItems = [];
+    grocery.items.forEach(it => {
+      const srcs = it.sources || [];
+      if (!srcs.some(s => s.id === recipeId)) { nextItems.push(it); return; }
+      if (srcs.length <= 1) { delIds.push(it.id); removed++; }
+      else { const nit = { ...it, sources: srcs.filter(s => s.id !== recipeId) }; nextItems.push(nit); upRows.push(listItemToRow(nit, grocery.id)); upIds.push(nit.id); kept++; }
+    });
+    if (!delIds.length && !upRows.length) return { removed: 0, kept: 0 };
+    setLists(prev => prev.map(l => l.id === grocery.id ? { ...l, items: nextItems } : l));
+    delIds.forEach(id => trackPending(id, { kind: "item", listId: grocery.id, deleted: true }));
+    upIds.forEach(id => trackPending(id, { kind: "item", listId: grocery.id, item: nextItems.find(x => x.id === id) }));
+    if (delIds.length) syncWrite("Couldn't remove from grocery", () => sb.del("list_items", `id=in.(${delIds.join(",")})`), delIds);
+    if (upRows.length) syncWrite("Couldn't update grocery", () => sb.upsert("list_items", upRows, "id"), upIds);
+    return { removed, kept };
+  };
+  // Manual quantity override on a grocery item.
+  const setItemQty = (listId, itemId, text) => {
+    const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
+    const updated = { ...it, measures: parseQtyInput(text) };
+    setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(x => x.id === itemId ? updated : x) }));
+    trackPending(itemId, { kind: "item", listId, item: updated });
+    syncWrite("Couldn't save the quantity", () => sb.upsert("list_items", [listItemToRow(updated, listId)], "id"), [itemId]);
+  };
+
   // ─── Categorization (Shopping Mode) ──────────────────────────────────────────
   // Merge with the latest server cache before writing so two devices
   // categorizing at once don't drop each other's entries (ours wins on conflict).
@@ -1143,14 +1192,14 @@ export default function App() {
           <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
             onSave={saveRecipe} onDelete={deleteRecipe}
             customTags={customTags} onAddCustomTag={addCustomTag} onDeleteCustomTag={deleteCustomTag}
-            onAddToGrocery={addRecipeToGrocery} />
+            onAddToGrocery={addRecipeToGrocery} onRemoveFromGrocery={removeRecipeFromGrocery} groceryCountFor={groceryCountForRecipe} />
         )}
         {tab === "lists" && (
           <ListsView lists={lists} openId={listView} syncStatus={syncStatus}
             onOpen={(id) => navigate("lists", id ? { listId: id } : null)}
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
-            onShopping={openShopping} />
+            onSetItemQty={setItemQty} onShopping={openShopping} />
         )}
       </div>
       <nav style={s.bottomNav}>
@@ -1185,7 +1234,7 @@ export default function App() {
         <GroceryDrawer
           list={lists.find(l => l.type === "grocery")}
           onClose={closeGrocery}
-          onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
+          onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems} onSetItemQty={setItemQty}
           weekRecipeCount={weekRecipeList().length} onAddWeek={addWeekToGrocery}
           onOpenFull={() => { setGroceryOpen(false); navigate("lists", { listId: GROCERY_ID }); }} />
       )}
@@ -1200,7 +1249,7 @@ export default function App() {
 }
 
 // ─── Grocery quick-drawer ─────────────────────────────────────────────────────
-function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onOpenFull, weekRecipeCount, onAddWeek }) {
+function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onOpenFull, weekRecipeCount, onAddWeek }) {
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
   const items = list?.items || [];
@@ -1235,7 +1284,7 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
           {items.length === 0 ? (
             <div style={s.listEmptyState}><div style={{fontSize:28,marginBottom:8}}>🛒</div><div style={s.listEmptyStateText}>Grocery list is empty. Add items above.</div></div>
           ) : (
-            <ListItemsList items={items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} />
+            <ListItemsList items={items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} qtyEditable={true} />
           )}
         </div>
 
@@ -2188,9 +2237,9 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
 }
 
 // ─── Recipes View ─────────────────────────────────────────────────────────────
-function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag, onAddToGrocery }) {
+function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag, onAddToGrocery, onRemoveFromGrocery, groceryCountFor }) {
   if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(recipes.some(r=>r.id===view.recipe?.id)?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} onDeleteCustomTag={onDeleteCustomTag} />;
-  if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} onAddToGrocery={onAddToGrocery} />;
+  if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} onAddToGrocery={onAddToGrocery} onRemoveFromGrocery={onRemoveFromGrocery} groceryCount={groceryCountFor ? groceryCountFor(view.recipe.id) : 0} />;
   return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
 
@@ -2495,7 +2544,7 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
 }
 
 // ─── Recipe Detail ────────────────────────────────────────────────────────────
-function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery }) {
+function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery, onRemoveFromGrocery, groceryCount }) {
   const [servings, setServings] = useState(recipe.baseServings || 4);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [groceryMsg, setGroceryMsg] = useState("");
@@ -2505,6 +2554,11 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery }) {
     const { added, merged } = onAddToGrocery(recipe);
     if (added + merged === 0) setGroceryMsg("No ingredients to add");
     else setGroceryMsg(`✓ Added ${added}${merged ? `, merged ${merged}` : ""} to grocery`);
+    setTimeout(() => setGroceryMsg(""), 2600);
+  };
+  const removeFromGrocery = () => {
+    const { removed, kept } = onRemoveFromGrocery(recipe.id);
+    setGroceryMsg(removed + kept === 0 ? "Nothing from this recipe on the list" : `✓ Removed ${removed}${kept ? `, kept ${kept} shared` : ""}`);
     setTimeout(() => setGroceryMsg(""), 2600);
   };
 
@@ -2578,6 +2632,7 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery }) {
               })}
             </div>
             <button style={s.addGroceryBtn} className="add-grocery-btn" onClick={addToGrocery}>🛒 Add to grocery list</button>
+            {groceryCount > 0 && <button style={s.removeGroceryBtn} className="remove-grocery-btn" onClick={removeFromGrocery}>🛒 Remove from grocery ({groceryCount})</button>}
             {groceryMsg && <div style={s.groceryMsg}>{groceryMsg}</div>}
           </div>
         )}
@@ -2780,19 +2835,36 @@ const computeDupKeys = (items) => {
 
 const abbrev = (str, n) => (str && str.length > n ? str.slice(0, n - 1) + "…" : str || "");
 
-function ListItemRow({ item, listId, isDup, onToggle, onDelete }) {
+function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEditable }) {
   const [showSrc, setShowSrc] = useState(false);
+  const [editingQty, setEditingQty] = useState(false);
+  const [qtyInput, setQtyInput] = useState("");
   const measures = formatMeasures(item.measures);
   const sources = item.sources || [];
   const hasSrc = sources.length > 0;
+  const startEdit = () => { setQtyInput(measures); setEditingQty(true); };
+  const saveQty = () => { onSetQty && onSetQty(listId, item.id, qtyInput); setEditingQty(false); };
   return (
     <div style={s.listItemRow}>
       <button style={{...s.listCheck,...(item.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggle(listId, item.id)}>{item.checked ? "✓" : ""}</button>
       <div style={{flex:1, minWidth:0}}>
         <div style={{...s.listItemText,...(item.checked?s.listItemTextChecked:{})}}>
-          {measures && <span style={s.listItemQty}>{measures} </span>}{item.text}
+          {measures
+            ? (qtyEditable
+                ? <button style={s.listItemQtyBtn} className="list-qty-btn" onClick={startEdit}>{measures}</button>
+                : <span style={s.listItemQty}>{measures} </span>)
+            : (qtyEditable && !item.checked ? <button style={s.listItemQtyAdd} className="list-qty-btn" onClick={startEdit}>+ qty</button> : null)}
+          {measures && qtyEditable ? " " : ""}{item.text}
           {isDup && <span style={s.listItemDup} title="Also on the list from another source">dup</span>}
         </div>
+        {editingQty && (
+          <div style={s.listQtyEditRow}>
+            <input style={s.listQtyInput} autoFocus value={qtyInput} placeholder="e.g. 2 lbs"
+              onChange={e => setQtyInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") saveQty(); if (e.key === "Escape") setEditingQty(false); }}
+              onBlur={saveQty} />
+          </div>
+        )}
         {hasSrc && showSrc && <div style={s.listItemSrcNames}>{sources.map(s => abbrev(s.name, 24)).join(", ")}</div>}
       </div>
       {hasSrc && <button style={s.listSrcIcon} className="list-src-icon" onClick={() => setShowSrc(v => !v)} title={sources.map(s => s.name).join(", ")}>🍽</button>}
@@ -2803,13 +2875,13 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete }) {
 
 // Shared renderer: manual items pinned on top, a thin divider, then recipe-sourced
 // items, then checked items at the bottom.
-function ListItemsList({ items, listId, onToggle, onDelete }) {
+function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditable }) {
   const dupKeys = computeDupKeys(items);
   const unchecked = items.filter(i => !i.checked);
   const checked = items.filter(i => i.checked);
   const manual = unchecked.filter(i => !(i.sources && i.sources.length));
   const recipe = unchecked.filter(i => i.sources && i.sources.length);
-  const rowOf = (it) => <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggle} onDelete={onDelete} />;
+  const rowOf = (it) => <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} qtyEditable={qtyEditable} />;
   return (
     <div style={s.listItems}>
       {manual.map(rowOf)}
@@ -2825,12 +2897,12 @@ function ListItemsList({ items, listId, onToggle, onDelete }) {
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onShopping }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onShopping }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
-      onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
+      onSetItemQty={onSetItemQty} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
   }
   return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} />;
 }
@@ -2903,7 +2975,7 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList }) {
   );
 }
 
-function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onUpdateList, onDeleteList, onShopping }) {
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onUpdateList, onDeleteList, onShopping }) {
   const [input, setInput] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -2966,7 +3038,7 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
             <div style={s.listEmptyStateText}>{isGrocery ? "Your grocery list is empty. Add items above." : "Nothing here yet. Add your first item above."}</div>
           </div>
         ) : (
-          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} />
+          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} qtyEditable={isGrocery} />
         )}
         <div style={{height:40}} />
       </div>
@@ -3352,12 +3424,17 @@ const s = {
   listItemText: { fontSize:15, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, wordBreak:"break-word" },
   listItemTextChecked: { color:"#6a5a48", textDecoration:"line-through" },
   listItemQty: { color:"#f4c97a", fontWeight:700 },
+  listItemQtyBtn: { background:"none", border:"none", padding:0, color:"#f4c97a", fontWeight:700, fontSize:"inherit", fontFamily:"inherit", cursor:"pointer", textDecoration:"underline", textDecorationStyle:"dotted", textUnderlineOffset:3 },
+  listItemQtyAdd: { background:"none", border:"1px dashed #4a3c2a", borderRadius:6, padding:"0 6px", color:"#7a6448", fontSize:11, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", marginRight:5 },
+  listQtyEditRow: { marginTop:6 },
+  listQtyInput: { width:"100%", maxWidth:160, background:"#1c1712", border:"1.5px solid #c8a878", borderRadius:8, padding:"6px 10px", fontSize:14, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" },
   listItemSrcNames: { fontSize:11, color:"#89a98c", fontFamily:"'DM Sans',sans-serif", marginTop:3 },
   listSrcIcon: { background:"none", border:"none", fontSize:14, cursor:"pointer", padding:"4px 4px", flexShrink:0, opacity:0.85, lineHeight:1 },
   listGroupDivider: { height:1, background:"#3a2e22", margin:"7px 0" },
   listItemDup: { fontSize:9, color:"#e0a84a", background:"#2e2418", border:"1px solid #6a5320", borderRadius:5, padding:"1px 5px", letterSpacing:"0.05em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", fontWeight:700, marginLeft:7, verticalAlign:"middle", whiteSpace:"nowrap" },
   listItemDel: { background:"none", border:"none", color:"#5a4a38", fontSize:13, cursor:"pointer", padding:"4px 6px", flexShrink:0 },
   addGroceryBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"11px", fontSize:14, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginTop:12 },
+  removeGroceryBtn: { width:"100%", background:"#2e1f1a", border:"1px solid #5a3328", borderRadius:10, padding:"10px", fontSize:13.5, color:"#e0a890", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginTop:8 },
   addWeekBtn: { width:"100%", background:"#1f3530", border:"1px solid #2a5048", borderRadius:10, padding:"10px", fontSize:13.5, color:"#7ecfcf", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, marginBottom:4 },
   groceryMsg: { fontSize:12.5, color:"#8ac878", fontFamily:"'DM Sans',sans-serif", textAlign:"center", marginTop:8 },
   listCheckedDivider: { fontSize:10, color:"#7a6448", letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", margin:"16px 0 6px" },
@@ -3465,6 +3542,8 @@ const css = `
   .save-error-dismiss:hover { color: #f4c4b4 !important; }
   .day-clear-btn:hover { border-color: #e07a5f !important; color: #e07a5f !important; }
   .create-recipe-btn:hover { border-color: #6a4a9a !important; background: #261e3e !important; }
+  .remove-grocery-btn:hover { border-color: #8a4838 !important; background: #3a2620 !important; }
+  .list-qty-btn:hover { color: #f4e060 !important; }
   .grocery-fab:active { transform: scale(0.96); }
   @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }
