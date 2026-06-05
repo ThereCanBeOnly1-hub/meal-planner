@@ -518,6 +518,8 @@ export default function App() {
   const [snacks, setSnacks] = useState([]);
   const [desserts, setDesserts] = useState([]);
   const [syncStatus, setSyncStatus] = useState(isConfigured ? "loading" : "unconfigured");
+  const [failedWrites, setFailedWrites] = useState([]); // unresolved save failures {id,label,message,fn}
+  const failIdRef = useRef(0);
   const [viewedWeekStart, setViewedWeekStart] = useState(weekStart());
   const [nextWeekMeals, setNextWeekMeals] = useState(initialWeek());
   const [prevWeekMeals, setPrevWeekMeals] = useState(initialWeek());
@@ -557,6 +559,30 @@ export default function App() {
 
   useEffect(() => { recipesRef.current = recipes; }, [recipes]);
   useEffect(() => { viewedWeekStartRef.current = viewedWeekStart; }, [viewedWeekStart]);
+
+  // Central DB write: runs `fn` (a thunk returning a promise). On failure it
+  // records the operation so the user is told (sticky banner) and can retry it.
+  // A successful read can't clear these — only a successful (re)write does.
+  const dbWrite = (label, fn) => {
+    if (!isConfigured) return Promise.resolve(true);
+    return fn()
+      .then(() => { setSyncStatus("synced"); return true; })
+      .catch(err => {
+        console.error(label, err);
+        const message = String(err?.message || err || "").replace(/\s+/g, " ").slice(0, 160);
+        setSyncStatus("error");
+        setFailedWrites(prev => [...prev, { id: ++failIdRef.current, label, message, fn }]);
+        return false;
+      });
+  };
+  const retryFailedWrites = () => {
+    if (!failedWrites.length) return;
+    const items = failedWrites;
+    setFailedWrites([]);
+    setSyncStatus("syncing");
+    items.forEach(f => dbWrite(f.label, f.fn)); // re-adds any that still fail
+  };
+  const dismissFailedWrites = () => setFailedWrites([]);
 
   const navigate = (newTab: string, newView: any) => {
     setTab(newTab);
@@ -675,9 +701,7 @@ export default function App() {
     if (!cells.length) return;
     cells.forEach(({ day, slot, entry }) => pendingMealsRef.current.set(`${ws}::${day}::${slot}`, entry));
     const settle = () => setTimeout(() => cells.forEach(({ day, slot }) => pendingMealsRef.current.delete(`${ws}::${day}::${slot}`)), 2500);
-    sb.upsert("meals", cells.map(({ day, slot, entry }) => mealRow(ws, day, slot, entry)), "week_start,day,slot")
-      .then(() => setSyncStatus("synced"))
-      .catch(err => { console.error("Sync meals:", err); setSyncStatus("error"); })
+    dbWrite("Couldn't save the meal", () => sb.upsert("meals", cells.map(({ day, slot, entry }) => mealRow(ws, day, slot, entry)), "week_start,day,slot"))
       .finally(settle);
   }, [week]);
 
@@ -689,11 +713,7 @@ export default function App() {
     extrasTimer.current = setTimeout(() => syncExtras(snacks, desserts), 300);
   }, [snacks, desserts]);
 
-  const saveCustomTagsToDB = async (tags) => {
-    if (!isConfigured) return;
-    try { await sb.upsert("app_settings", [{ key: "custom_tags", value: tags }], "key"); }
-    catch (e) { console.error("Custom tag save failed:", e); }
-  };
+  const saveCustomTagsToDB = (tags) => dbWrite("Couldn't save custom tags", () => sb.upsert("app_settings", [{ key: "custom_tags", value: tags }], "key"));
 
   const addCustomTag = (type, tag) => {
     setCustomTags(prev => {
@@ -725,11 +745,7 @@ export default function App() {
         }
         return r;
       });
-      if (isConfigured && changed.length) {
-        sb.upsert("recipes", changed.map(recipeToRow))
-          .then(() => setSyncStatus("synced"))
-          .catch(err => { console.error("Tag cleanup save:", err); setSyncStatus("error"); });
-      }
+      if (changed.length) dbWrite("Couldn't update recipes after tag delete", () => sb.upsert("recipes", changed.map(recipeToRow)));
       return updated;
     });
   };
@@ -802,7 +818,7 @@ export default function App() {
       if (!builtLists.some(l => l.type === "grocery")) {
         const grocery = { id: GROCERY_ID, name: "Grocery", type: "grocery", icon: "🛒", position: -1, items: [] };
         builtLists = [grocery, ...builtLists];
-        sb.upsert("lists", [listToRow(grocery)], "id").catch(e => console.error("Grocery init:", e));
+        dbWrite("Couldn't create the grocery list", () => sb.upsert("lists", [listToRow(grocery)], "id"));
       }
       // Re-apply any in-flight local writes so a poll mid-write doesn't make a
       // just-added/just-toggled item flicker out until it's confirmed server-side.
@@ -865,43 +881,32 @@ export default function App() {
   const syncExtras = async (snackList, dessertList) => {
     if (syncExtrasLockRef.current) return;
     syncExtrasLockRef.current = true;
-    try {
-      const ws = viewedWeekStartRef.current;
+    const ws = viewedWeekStartRef.current;
+    const run = async () => {
       await sb.del("extras", `week_start=eq.${ws}`);
       const rows = [
         ...snackList.map(name => ({ week_start: ws, type: "snack", name })),
         ...dessertList.map(name => ({ week_start: ws, type: "dessert", name })),
       ];
       if (rows.length > 0) await sb.upsert("extras", rows);
-      setSyncStatus("synced");
-    } catch (err) { console.error("Sync extras:", err); setSyncStatus("error"); }
-    finally { syncExtrasLockRef.current = false; }
+    };
+    dbWrite("Couldn't save snacks/desserts", run).finally(() => { syncExtrasLockRef.current = false; });
   };
 
-  const saveRecipe = async (recipe) => {
+  const saveRecipe = (recipe) => {
     recipe = { ...recipe, name: recipe.name.trim() };
     setRecipes(prev => {
       const exists = prev.find(r => r.id === recipe.id);
       return exists ? prev.map(r => r.id === recipe.id ? recipe : r) : [...prev, recipe];
     });
     navigate("recipes", { recipe });
-    if (isConfigured) {
-      try {
-        await sb.upsert("recipes", [recipeToRow(recipe)]);
-        setSyncStatus("synced");
-      } catch (err) { console.error("Save recipe:", err); setSyncStatus("error"); }
-    }
+    dbWrite("Couldn't save the recipe", () => sb.upsert("recipes", [recipeToRow(recipe)]));
   };
 
-  const deleteRecipe = async (id) => {
+  const deleteRecipe = (id) => {
     setRecipes(prev => prev.filter(r => r.id !== id));
     navigate("recipes", null);
-    if (isConfigured) {
-      try {
-        await sb.del("recipes", `id=eq.${id}`);
-        setSyncStatus("synced");
-      } catch (err) { console.error("Delete recipe:", err); setSyncStatus("error"); }
-    }
+    dbWrite("Couldn't delete the recipe", () => sb.del("recipes", `id=eq.${id}`));
   };
 
   const recipesBySlot = (slot) => recipes.filter(r => r.mealTypes.includes(slot)).map(r => r.name);
@@ -914,12 +919,10 @@ export default function App() {
   // reconcile). Entries linger briefly after the write settles to cover a poll
   // that started mid-write.
   const trackPending = (id, desc) => pendingListRef.current.set(id, desc);
-  const syncWrite = (label, p, settleIds) => {
+  const syncWrite = (label, makeP, settleIds) => {
     const clear = () => settleIds && settleIds.forEach(id => pendingListRef.current.delete(id));
     if (!isConfigured) { clear(); return; }
-    p.then(() => setSyncStatus("synced"))
-      .catch(e => { console.error(label, e); setSyncStatus("error"); })
-      .finally(() => { if (settleIds) setTimeout(clear, 2500); });
+    dbWrite(label, makeP).finally(() => { if (settleIds) setTimeout(clear, 2500); });
   };
 
   const addList = (name, icon) => {
@@ -927,7 +930,7 @@ export default function App() {
     const list = { id: genId(), name: name.trim() || "Untitled List", type: "custom", icon: icon || "📝", position: pos, items: [] };
     setLists(prev => [...prev, list]);
     trackPending(list.id, { kind: "list", listObj: list });
-    syncWrite("Add list:", sb.upsert("lists", [listToRow(list)], "id"), [list.id]);
+    syncWrite("Couldn't save the new list", () => sb.upsert("lists", [listToRow(list)], "id"), [list.id]);
     return list.id;
   };
   const updateList = (id, fields) => {
@@ -935,14 +938,14 @@ export default function App() {
     const updated = { ...cur, ...fields };
     setLists(prev => prev.map(l => l.id === id ? updated : l));
     trackPending(id, { kind: "list", listObj: updated });
-    syncWrite("Update list:", sb.upsert("lists", [listToRow(updated)], "id"), [id]);
+    syncWrite("Couldn't save the list change", () => sb.upsert("lists", [listToRow(updated)], "id"), [id]);
   };
   const deleteList = (id) => {
     if (id === GROCERY_ID) return; // grocery can't be deleted
     setLists(prev => prev.filter(l => l.id !== id));
     if (listView === id) navigate("lists", null);
     trackPending(id, { kind: "list", deleted: true });
-    syncWrite("Delete list:", sb.del("lists", `id=eq.${id}`), [id]); // cascade removes items
+    syncWrite("Couldn't delete the list", () => sb.del("lists", `id=eq.${id}`), [id]); // cascade removes items
   };
   const addListItem = (listId, text) => {
     const t = text.trim(); if (!t) return;
@@ -951,19 +954,19 @@ export default function App() {
     const item = { id: genId(), text: t, checked: false, position: pos, category: "", measures: [], sources: [] };
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
     trackPending(item.id, { kind: "item", listId, item });
-    syncWrite("Add item:", sb.upsert("list_items", [listItemToRow(item, listId)], "id"), [item.id]);
+    syncWrite("Couldn't save the item", () => sb.upsert("list_items", [listItemToRow(item, listId)], "id"), [item.id]);
   };
   const toggleListItem = (listId, itemId) => {
     const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
     const toggled = { ...it, checked: !it.checked };
     setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(x => x.id === itemId ? toggled : x) }));
     trackPending(itemId, { kind: "item", listId, item: toggled });
-    syncWrite("Toggle item:", sb.upsert("list_items", [listItemToRow(toggled, listId)], "id"), [itemId]);
+    syncWrite("Couldn't save the check", () => sb.upsert("list_items", [listItemToRow(toggled, listId)], "id"), [itemId]);
   };
   const deleteListItem = (listId, itemId) => {
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: l.items.filter(it => it.id !== itemId) } : l));
     trackPending(itemId, { kind: "item", listId, deleted: true });
-    syncWrite("Delete item:", sb.del("list_items", `id=eq.${itemId}`), [itemId]);
+    syncWrite("Couldn't delete the item", () => sb.del("list_items", `id=eq.${itemId}`), [itemId]);
   };
   const clearListItems = (listId, onlyChecked) => {
     const list = lists.find(l => l.id === listId);
@@ -971,7 +974,7 @@ export default function App() {
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: onlyChecked ? l.items.filter(it => !it.checked) : [] } : l));
     removed.forEach(id => trackPending(id, { kind: "item", listId, deleted: true }));
     const q = onlyChecked ? `list_id=eq.${listId}&checked=eq.true` : `list_id=eq.${listId}`;
-    syncWrite("Clear items:", sb.del("list_items", q), removed);
+    syncWrite("Couldn't clear the items", () => sb.del("list_items", q), removed);
   };
 
   // Add one or more recipes' ingredients to the grocery list. Recipe-sourced
@@ -1022,7 +1025,7 @@ export default function App() {
     });
     const finalItems = [...items, ...newItems];
     setLists(prev => prev.map(l => l.id === grocery.id ? { ...l, items: finalItems } : l));
-    if (rows.length) syncWrite("Add to grocery:", sb.upsert("list_items", rows, "id"), changedIds);
+    if (rows.length) syncWrite("Couldn't add to grocery", () => sb.upsert("list_items", rows, "id"), changedIds);
     return { added, merged };
   };
   const addRecipeToGrocery = (recipe) => addRecipesToGrocery([recipe]);
@@ -1037,14 +1040,14 @@ export default function App() {
   // ─── Categorization (Shopping Mode) ──────────────────────────────────────────
   // Merge with the latest server cache before writing so two devices
   // categorizing at once don't drop each other's entries (ours wins on conflict).
-  const saveIngredientCats = async (next) => {
+  const saveIngredientCats = (next) => {
     if (!isConfigured) return;
-    try {
+    dbWrite("Couldn't save aisle categories", async () => {
       const rows = await sb.get("app_settings", "?key=eq.ingredient_categories").catch(() => []);
       const merged = { ...(rows[0]?.value || {}), ...next };
       await sb.upsert("app_settings", [{ key: "ingredient_categories", value: merged }], "key");
       setIngredientCats(merged);
-    } catch (e) { console.error("Cat cache save:", e); }
+    });
   };
 
   // Categorize any grocery items whose ingredient isn't cached yet (one batched call).
@@ -1079,11 +1082,25 @@ export default function App() {
 
   const openShopping = () => { setShoppingOpen(true); setCatStatus(""); history.pushState({ overlay: "shopping" }, ""); categorizeGroceryItems(); };
   const closeShopping = () => { setShoppingOpen(false); if (!shoppingPopRef.current) history.back(); };
-  const saveStoreLayout = (next) => { setStoreLayout(next); if (isConfigured) sb.upsert("app_settings", [{ key: "store_layout", value: next }], "key").catch(e => console.error("Store layout save:", e)); };
+  const saveStoreLayout = (next) => { setStoreLayout(next); dbWrite("Couldn't save the store layout", () => sb.upsert("app_settings", [{ key: "store_layout", value: next }], "key")); };
 
   return (
     <div style={s.appRoot}>
       <style>{css}</style>
+
+      {failedWrites.length > 0 && (
+        <div style={s.saveErrorBar}>
+          <span style={s.saveErrorText}>
+            ⚠️ {failedWrites.length === 1 ? (failedWrites[0].label || "A change didn't save") : `${failedWrites.length} changes didn't save`}
+            {failedWrites.length === 1 && failedWrites[0].message ? ` — ${failedWrites[0].message}` : ""}
+          </span>
+          <div style={s.saveErrorBtns}>
+            <button style={s.saveErrorRetry} className="save-error-retry" onClick={retryFailedWrites}>Retry</button>
+            <button style={s.saveErrorDismiss} className="save-error-dismiss" onClick={dismissFailedWrites}>✕</button>
+          </div>
+        </div>
+      )}
+
       <div style={s.appBody}>
         {tab === "planner" && (
           <PlannerView recipesBySlot={recipesBySlot} recipes={recipes}
@@ -3274,6 +3291,11 @@ const s = {
   listMenuItemDim: { opacity:0.4 },
 
   // Grocery FAB + quick-drawer
+  saveErrorBar: { position:"fixed", top:0, left:0, right:0, zIndex:95, background:"#5a1f18", borderBottom:"1px solid #8a3328", display:"flex", alignItems:"center", gap:10, padding:"9px 14px", boxShadow:"0 4px 14px rgba(0,0,0,0.4)" },
+  saveErrorText: { flex:1, fontSize:12.5, color:"#f4c4b4", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, minWidth:0 },
+  saveErrorBtns: { display:"flex", alignItems:"center", gap:8, flexShrink:0 },
+  saveErrorRetry: { background:"#f4c97a", border:"none", borderRadius:7, padding:"5px 13px", fontSize:12.5, fontWeight:700, color:"#1c1712", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  saveErrorDismiss: { background:"none", border:"none", color:"#e0a890", fontSize:14, cursor:"pointer", padding:"2px 6px" },
   groceryFab: { position:"fixed", right:16, bottom:72, width:38, height:38, borderRadius:"50%", background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", boxShadow:"0 6px 16px rgba(0,0,0,0.4)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", zIndex:48 },
   groceryFabBadge: { position:"absolute", top:-4, right:-4, background:"#e07a5f", color:"#fff", fontSize:9, fontWeight:800, minWidth:16, height:16, borderRadius:8, display:"flex", alignItems:"center", justifyContent:"center", padding:"0 4px", fontFamily:"'DM Sans',sans-serif", border:"1.5px solid #1c1712" },
   groceryOverlay: { position:"fixed", inset:0, background:"rgba(12,10,8,0.6)", zIndex:110, display:"flex", justifyContent:"flex-end", backdropFilter:"blur(2px)" },
@@ -3360,6 +3382,8 @@ const css = `
   .list-menu-item:hover { background: #3a2e22 !important; }
   .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }
   .grocery-fab:hover { transform: scale(1.06); }
+  .save-error-retry:hover { opacity: 0.9; }
+  .save-error-dismiss:hover { color: #f4c4b4 !important; }
   .grocery-fab:active { transform: scale(0.96); }
   @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }

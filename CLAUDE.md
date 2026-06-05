@@ -20,6 +20,7 @@
 - All styles in a single `s` object at the bottom of App.tsx
 - CSS string `css` for hover/active states (inline styles can't do :hover)
 - `isLoadingRef` + `hasLoadedRef` guards prevent syncing before first load completes
+- **All DB writes go through `dbWrite(label, fn)`** (fn is a thunk returning the sb promise). On failure it records `{label, message, fn}` in `failedWrites` and shows a sticky top banner with Retry (re-runs the thunk) / Dismiss. A successful *read* (poll) can NOT clear a failed *write* — only a successful retry/dismiss does (this is what makes failed saves loud instead of silently reverting). `label` is the user-facing message ("Couldn't save the meal"). When adding a new write path, route it through `dbWrite`.
 - `syncExtrasLockRef` mutex prevents concurrent DELETE+INSERT races on extras
 - `visibilitychange` throttled to once per 5s via `lastVisibilityLoadRef`
 - `loadAll(opts)` bails early if `isLoadingRef.current` is true (concurrent load guard). `opts.recipes:false` skips the recipe fetch (polls do this — recipes change rarely + carry base64 photos; refetched on mount/visibility via `recipesLoadedRef`). `opts.silent` skips the "syncing" indicator (background polls). It builds all next-values, computes a JSON `sig`, and **skips every `setState` when `sig` matches `lastPayloadSigRef`** — so a no-op poll causes zero re-renders. The 10s poll is paused while `document.hidden`.
