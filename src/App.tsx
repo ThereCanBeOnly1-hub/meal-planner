@@ -21,6 +21,13 @@ const initialWeek = () => {
   return w;
 };
 
+const mealRow = (ws, day, slot, e) => ({
+  week_start: ws, day, slot,
+  meal_name: e.meal || "", thaw: e.thaw || false, thaw_days: e.thawDays || 2, recipe_id: e.recipeId || null,
+  updated_at: new Date().toISOString(),
+});
+const mealCellEq = (a, b) => !!a && !!b && a.meal === b.meal && !!a.thaw === !!b.thaw && (a.thawDays || 2) === (b.thawDays || 2) && (a.recipeId || null) === (b.recipeId || null);
+
 const addWeeks = (ws, n) => {
   const d = new Date(ws + "T00:00:00"); d.setDate(d.getDate() + n * 7);
   return d.toISOString().split("T")[0];
@@ -517,6 +524,8 @@ export default function App() {
   const isLoadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
   const recipesLoadedRef = useRef(false);
+  const pendingMealsRef = useRef(new Map()); // `ws::day::slot` -> entry of in-flight meal writes
+  const lastSyncedWeekRef = useRef(null);    // baseline week to diff against for per-cell sync
   const syncExtrasLockRef = useRef(false);
   const lastVisibilityLoadRef = useRef(0);
   const mealTimer = useRef(null);
@@ -624,11 +633,29 @@ export default function App() {
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
 
-  // Sync meals to DB when week changes (debounced 300ms)
+  // Sync meals to DB when week changes (debounced 300ms). Writes ONLY the cells
+  // that differ from the last-synced baseline, so concurrent edits to other
+  // cells (by the other user) aren't overwritten.
   useEffect(() => {
     if (isLoadingRef.current || !hasLoadedRef.current || !isConfigured) return;
     clearTimeout(mealTimer.current);
-    mealTimer.current = setTimeout(() => syncMeals(week), 300);
+    mealTimer.current = setTimeout(() => {
+      const ws = viewedWeekStartRef.current;
+      const prev = lastSyncedWeekRef.current;
+      const cells = [];
+      DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
+        const cur = week[day][slot];
+        if (!mealCellEq(cur, prev?.[day]?.[slot])) cells.push({ day, slot, entry: cur });
+      }));
+      lastSyncedWeekRef.current = week;
+      if (!cells.length) return;
+      cells.forEach(({ day, slot, entry }) => pendingMealsRef.current.set(`${ws}::${day}::${slot}`, entry));
+      const settle = () => setTimeout(() => cells.forEach(({ day, slot }) => pendingMealsRef.current.delete(`${ws}::${day}::${slot}`)), 2500);
+      sb.upsert("meals", cells.map(({ day, slot, entry }) => mealRow(ws, day, slot, entry)), "week_start,day,slot")
+        .then(() => setSyncStatus("synced"))
+        .catch(err => { console.error("Sync meals:", err); setSyncStatus("error"); })
+        .finally(settle);
+    }, 300);
   }, [week]);
 
   // Sync extras to DB when snacks/desserts change (debounced 300ms)
@@ -714,7 +741,14 @@ export default function App() {
         });
         return w;
       };
-      setWeek(parseWeekRows(mealsRows));
+      // Re-apply in-flight meal edits so a poll mid-write can't clobber them.
+      const mergedWeek = parseWeekRows(mealsRows);
+      pendingMealsRef.current.forEach((entry, key) => {
+        const [pws, day, slot] = key.split("::");
+        if (pws === ws && mergedWeek[day]?.[slot] !== undefined) mergedWeek[day][slot] = entry;
+      });
+      lastSyncedWeekRef.current = mergedWeek; // baseline so the sync effect sees no spurious diff
+      setWeek(mergedWeek);
       setNextWeekMeals(parseWeekRows(nextMealsRows));
       setPrevWeekMeals(parseWeekRows(prevMealsRows));
 
@@ -790,22 +824,6 @@ export default function App() {
     } finally {
       isLoadingRef.current = false;
     }
-  };
-
-  const syncMeals = async (weekData) => {
-    try {
-      const ws = viewedWeekStartRef.current;
-      const rows = [];
-      DAYS.forEach(day => MEAL_SLOTS.forEach(slot => {
-        const e = weekData[day][slot];
-        rows.push({ week_start: ws, day, slot,
-          meal_name: e.meal || "", thaw: e.thaw || false,
-          thaw_days: e.thawDays || 2, recipe_id: e.recipeId || null,
-          updated_at: new Date().toISOString() });
-      }));
-      await sb.upsert("meals", rows, "week_start,day,slot");
-      setSyncStatus("synced");
-    } catch (err) { console.error("Sync meals:", err); setSyncStatus("error"); }
   };
 
   const syncExtras = async (snackList, dessertList) => {
