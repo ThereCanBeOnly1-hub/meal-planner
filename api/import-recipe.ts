@@ -3,6 +3,9 @@
 // or a cookbook photo using Claude, returning JSON shaped for the recipe editor.
 import Anthropic from "@anthropic-ai/sdk";
 
+// Cap the function so it can never hang for minutes (Claude + page fetch).
+export const config = { maxDuration: 60 };
+
 // Require a valid Supabase session before spending Claude credits.
 async function requireAuth(req, res) {
   const SUPABASE_URL = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL;
@@ -84,6 +87,7 @@ async function fetchPageContent(url) {
         "Accept": "text/html,application/xhtml+xml",
       },
       redirect: "follow",
+      signal: AbortSignal.timeout(12000), // don't hang on slow/blocking sites
     });
   } catch (e) {
     const err = new Error("page_fetch_failed");

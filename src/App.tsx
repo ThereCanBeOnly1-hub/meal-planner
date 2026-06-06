@@ -2475,11 +2475,19 @@ function ImportModal({ onClose, onImported }) {
   const close = () => history.back();
 
   const callImport = async (payload) => {
-    const resp = await fetch("/api/import-recipe", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${_authToken || ""}` },
-      body: JSON.stringify(payload),
-    });
+    let resp;
+    try {
+      resp = await fetch("/api/import-recipe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${_authToken || ""}` },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(75000), // never hang the UI if the server stalls
+      });
+    } catch (e) {
+      throw new Error(e?.name === "TimeoutError"
+        ? "This is taking too long — the recipe site may be blocking the import. Try a different link or the photo option."
+        : "Couldn't reach the import service. Check your connection and try again.");
+    }
     let data;
     try { data = await resp.json(); } catch { data = {}; }
     if (!resp.ok) throw new Error(data.message || "Import failed. Please try again.");
