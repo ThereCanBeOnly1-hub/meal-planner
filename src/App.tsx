@@ -483,32 +483,77 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL ?? "";
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY ?? "";
 const isConfigured = !SUPABASE_URL.includes("PASTE");
 
+// Current logged-in access token (set by App). DB requests use it instead of the
+// anon key, so RLS can restrict the database to authenticated users.
+let _authToken = null;
+let _onAuthError = () => {};        // called when auth truly fails (→ sign out)
+let _refreshHook = async () => null; // returns a fresh token or null; set by App
+const setAuthToken = (t) => { _authToken = t; };
+const setOnAuthError = (fn) => { _onAuthError = fn; };
+const setRefreshHook = (fn) => { _refreshHook = fn; };
+
 const sb = {
   h: () => ({
     "apikey": SUPABASE_KEY,
-    "Authorization": `Bearer ${SUPABASE_KEY}`,
+    "Authorization": `Bearer ${_authToken || SUPABASE_KEY}`,
     "Content-Type": "application/json",
   }),
+  // On 401/403, try one token refresh and retry; if that fails, trigger sign-out.
+  async _req(url, opts = {}) {
+    let r = await fetch(url, { ...opts, headers: { ...this.h(), ...(opts.headers || {}) } });
+    if (r.status === 401 || r.status === 403) {
+      const t = await _refreshHook();
+      if (t) r = await fetch(url, { ...opts, headers: { ...this.h(), ...(opts.headers || {}) } });
+      else _onAuthError();
+    }
+    return r;
+  },
   async get(table, query = "") {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, { headers: this.h() });
+    const r = await this._req(`${SUPABASE_URL}/rest/v1/${table}${query}`);
     if (!r.ok) throw new Error(await r.text());
     return r.json();
   },
   async upsert(table, data, onConflict = "") {
     const q = onConflict ? `?on_conflict=${onConflict}` : "";
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}${q}`, {
+    const r = await this._req(`${SUPABASE_URL}/rest/v1/${table}${q}`, {
       method: "POST",
-      headers: { ...this.h(), "Prefer": "resolution=merge-duplicates,return=minimal" },
+      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
       body: JSON.stringify(Array.isArray(data) ? data : [data]),
     });
     if (!r.ok) throw new Error(await r.text());
   },
   async del(table, query) {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
-      method: "DELETE", headers: this.h(),
-    });
+    const r = await this._req(`${SUPABASE_URL}/rest/v1/${table}?${query}`, { method: "DELETE" });
     if (!r.ok) throw new Error(await r.text());
   },
+};
+
+// ─── Auth (email + password; login only, no in-app sign-up) ───────────────────
+const AUTH_URL = `${SUPABASE_URL}/auth/v1`;
+const SESSION_KEY = "mealplanner_session";
+const loadSession = () => { try { return JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch { return null; } };
+const saveSession = (s) => { try { s ? localStorage.setItem(SESSION_KEY, JSON.stringify(s)) : localStorage.removeItem(SESSION_KEY); } catch {} };
+const withExpiry = (data) => ({ ...data, expires_at: data.expires_at || (Math.floor(Date.now() / 1000) + (data.expires_in || 3600)) });
+const authSignIn = async (email, password) => {
+  const r = await fetch(`${AUTH_URL}/token?grant_type=password`, {
+    method: "POST", headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email: email.trim(), password }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error_description || data.msg || data.error || "Sign in failed");
+  return withExpiry(data);
+};
+const authRefresh = async (refresh_token) => {
+  const r = await fetch(`${AUTH_URL}/token?grant_type=refresh_token`, {
+    method: "POST", headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error("Session refresh failed");
+  return withExpiry(data);
+};
+const authSignOut = (access_token) => {
+  fetch(`${AUTH_URL}/logout`, { method: "POST", headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${access_token}` } }).catch(() => {});
 };
 
 const weekStart = () => {
@@ -536,7 +581,76 @@ export {
 };
 
 // ─── Main Component ───────────────────────────────────────────────────────────
+function Login({ onSignIn }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!email.trim() || !password || busy) return;
+    setBusy(true); setError("");
+    try { await onSignIn(email, password); }
+    catch (e) { setError(e?.message || "Sign in failed"); setBusy(false); }
+  };
+  return (
+    <div style={s.loginRoot}>
+      <div style={s.loginCard} className="modal-in">
+        <div style={s.loginIcon}>🍽️</div>
+        <div style={s.loginTitle}>Meal Planner</div>
+        <div style={s.loginSub}>Sign in to continue</div>
+        <input style={s.loginInput} type="email" autoComplete="email" placeholder="Email" value={email}
+          onChange={e => setEmail(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+        <input style={s.loginInput} type="password" autoComplete="current-password" placeholder="Password" value={password}
+          onChange={e => setPassword(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+        {error && <div style={s.loginError}>⚠️ {error}</div>}
+        <button style={{...s.loginBtn, ...((busy || !email.trim() || !password) ? s.btnDisabled : {})}} onClick={submit} disabled={busy}>
+          {busy ? "Signing in…" : "Sign in"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [session, setSession] = useState(() => loadSession());
+  const sessionRef = useRef(session);
+  // Keep the DB client's token + auth-error handler in sync with the session.
+  if (_authToken !== (session?.access_token || null)) setAuthToken(session?.access_token || null);
+  const applySession = (s) => { sessionRef.current = s; setAuthToken(s?.access_token || null); saveSession(s); setSession(s); };
+  const signOut = () => { if (sessionRef.current?.access_token) authSignOut(sessionRef.current.access_token); applySession(null); };
+  const handleSignIn = async (email, password) => { applySession(await authSignIn(email, password)); };
+  const signOutRef = useRef(signOut); signOutRef.current = signOut;
+  const refreshingRef = useRef(null); // dedupes concurrent refreshes
+  useEffect(() => {
+    setOnAuthError(() => signOutRef.current());
+    setRefreshHook(() => {
+      const s = sessionRef.current;
+      if (!s?.refresh_token) return Promise.resolve(null);
+      if (!refreshingRef.current) {
+        refreshingRef.current = authRefresh(s.refresh_token)
+          .then(ns => { applySession(ns); return ns.access_token; })
+          .catch(() => null)
+          .finally(() => { refreshingRef.current = null; });
+      }
+      return refreshingRef.current;
+    });
+  }, []);
+  // Keep the session token fresh; drop to login if it can't be refreshed.
+  useEffect(() => {
+    if (!session) return;
+    let alive = true;
+    const tick = async () => {
+      const s = sessionRef.current; if (!s) return;
+      if (s.expires_at && s.expires_at - Math.floor(Date.now() / 1000) < 300) {
+        try { const ns = await authRefresh(s.refresh_token); if (alive) applySession(ns); }
+        catch { if (alive) signOut(); }
+      }
+    };
+    tick();
+    const id = setInterval(tick, 60000);
+    return () => { alive = false; clearInterval(id); };
+  }, [session]);
+
   const [tab, setTab] = useState("planner");
   const [recipes, setRecipes] = useState([]);
   const [recipeView, setRecipeView] = useState(null);
@@ -591,7 +705,7 @@ export default function App() {
   // records the operation so the user is told (sticky banner) and can retry it.
   // A successful read can't clear these — only a successful (re)write does.
   const dbWrite = (label, fn) => {
-    if (!isConfigured) return Promise.resolve(true);
+    if (!isConfigured || !sessionRef.current) return Promise.resolve(true);
     return fn()
       .then(() => { setSyncStatus("synced"); return true; })
       .catch(err => {
@@ -655,10 +769,11 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, [shoppingOpen]);
 
-  // Reload when viewed week changes
+  // Reload when the viewed week changes, or when a user signs in.
   useEffect(() => {
-    if (!isConfigured) return;
+    if (!isConfigured || !session) return;
     hasLoadedRef.current = false;
+    recipesLoadedRef.current = false;      // refetch recipes on (re)login
     lastPayloadSigRef.current = "";        // force loadAll to apply the new week's data
     setWeek(initialWeek());
     setNextWeekMeals(initialWeek());
@@ -666,8 +781,8 @@ export default function App() {
     setLists([]);
     setSnacks([]);
     setDesserts([]);
-    loadAll({ recipes: false }); // recipes are global; fetched once (or on focus), not per week
-  }, [viewedWeekStart]);
+    loadAll();
+  }, [viewedWeekStart, session?.user?.id]);
 
   // One-time geolocation prompt
   useEffect(() => {
@@ -696,9 +811,9 @@ export default function App() {
   // photos); recipes refresh on mount + when the tab regains focus.
   useEffect(() => {
     if (!isConfigured) return;
-    const id = setInterval(() => { if (!document.hidden) loadAll({ recipes: false, silent: true }); }, 10000);
+    const id = setInterval(() => { if (!document.hidden && sessionRef.current) loadAll({ recipes: false, silent: true }); }, 10000);
     const onVisible = () => {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible" || !sessionRef.current) return;
       const now = Date.now();
       if (now - lastVisibilityLoadRef.current < 5000) return;
       lastVisibilityLoadRef.current = now;
@@ -778,7 +893,7 @@ export default function App() {
   };
 
   const loadAll = async (opts = {}) => {
-    if (isLoadingRef.current) return;
+    if (isLoadingRef.current || (isConfigured && !sessionRef.current)) return;
     // Fetch recipes on the first load and when explicitly requested; polls skip
     // them (rarely change, heavy base64 photos).
     const wantRecipes = opts.recipes !== false || !recipesLoadedRef.current;
@@ -1181,6 +1296,8 @@ export default function App() {
   const closeShopping = () => { setShoppingOpen(false); if (!shoppingPopRef.current) history.back(); };
   const saveStoreLayout = (next) => { setStoreLayout(next); dbWrite("Couldn't save the store layout", () => sb.upsert("app_settings", [{ key: "store_layout", value: next }], "key")); };
 
+  if (isConfigured && !session) return <Login onSignIn={handleSignIn} />;
+
   return (
     <div style={s.appRoot}>
       <style>{css}</style>
@@ -1229,7 +1346,8 @@ export default function App() {
             onOpen={(id) => navigate("lists", id ? { listId: id } : null)}
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
-            onSetItemQty={setItemQty} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping} />
+            onSetItemQty={setItemQty} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping}
+            userEmail={session?.user?.email} onSignOut={signOut} />
         )}
       </div>
       <nav style={s.bottomNav}>
@@ -2966,17 +3084,17 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditabl
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onShopping }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onShopping, userEmail, onSignOut }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
       onSetItemQty={onSetItemQty} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
   }
-  return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} />;
+  return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} userEmail={userEmail} onSignOut={onSignOut} />;
 }
 
-function ListIndex({ lists, syncStatus, onOpen, onAddList }) {
+function ListIndex({ lists, syncStatus, onOpen, onAddList, userEmail, onSignOut }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [icon, setIcon] = useState("📝");
@@ -3039,6 +3157,12 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList }) {
         <div style={s.listEmptyHint}>No custom lists yet. Create one for to-dos, packing, projects — anything.</div>
       ) : custom.map(card)}
 
+      {onSignOut && (
+        <div style={s.accountRow}>
+          {userEmail && <span style={s.accountEmail}>Signed in as {userEmail}</span>}
+          <button style={s.signOutBtn} className="sign-out-btn" onClick={onSignOut}>Sign out</button>
+        </div>
+      )}
       <div style={{height:40}} />
     </div>
   );
@@ -3174,6 +3298,18 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const s = {
+  loginRoot: { minHeight:"100vh", background:"linear-gradient(160deg,#2a2118,#1c1712)", display:"flex", alignItems:"center", justifyContent:"center", padding:20 },
+  loginCard: { width:"100%", maxWidth:340, background:"#241e16", border:"1px solid #3a2e22", borderRadius:18, padding:"28px 22px", textAlign:"center", boxShadow:"0 24px 60px rgba(0,0,0,0.5)" },
+  loginIcon: { fontSize:40, marginBottom:8 },
+  loginTitle: { fontSize:22, fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", letterSpacing:"-0.01em" },
+  loginSub: { fontSize:13, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginBottom:20 },
+  loginInput: { width:"100%", background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:10, padding:"12px 14px", fontSize:16, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box", marginBottom:10 },
+  loginError: { fontSize:12.5, color:"#f0a890", fontFamily:"'DM Sans',sans-serif", marginBottom:10, textAlign:"left" },
+  loginBtn: { width:"100%", background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", borderRadius:10, padding:"12px", fontSize:15, fontWeight:700, color:"#1c1712", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", marginTop:4 },
+  accountRow: { display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, marginTop:24, paddingTop:14, borderTop:"1px solid #2a2018" },
+  accountEmail: { fontSize:11.5, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" },
+  signOutBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"7px 13px", fontSize:12.5, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, flexShrink:0 },
+
   // App shell
   appRoot: { minHeight:"100vh", background:"#1c1712", fontFamily:"'Lora',Georgia,serif", color:"#f0e8d8", display:"flex", flexDirection:"column", overflowX:"hidden" },
   appBody: { flex:1, overflowY:"auto", paddingBottom:64 },
@@ -3681,6 +3817,7 @@ const css = `
   .create-recipe-btn:hover { border-color: #6a4a9a !important; background: #261e3e !important; }
   .remove-grocery-btn:hover { border-color: #8a4838 !important; background: #3a2620 !important; }
   .list-qty-btn:hover { color: #f4e060 !important; }
+  .sign-out-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
   .grocery-fab:active { transform: scale(0.96); }
   @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
   .chip:hover { background: #2e2418 !important; border-color: #c8a878 !important; color: #f0e0c0 !important; }

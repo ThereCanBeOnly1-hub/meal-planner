@@ -15,6 +15,14 @@
 - **lists**: id (TEXT PK), name, type ('grocery'|'custom'), icon, position, created_at, updated_at
 - **list_items**: id (TEXT PK), list_id (FK→lists, ON DELETE CASCADE), text, checked, position, qty, unit, category, source_recipe_id (last four reserved for Phase 2), created_at, updated_at
 
+## Auth
+
+- Supabase Auth (email+password), **login only — no in-app sign-up** (so randoms can't self-register past RLS). `Login` component gates the whole app: `if (isConfigured && !session) return <Login/>`. Accounts are created in the Supabase dashboard.
+- Session persists in `localStorage` (`mealplanner_session`). DB requests send the user's `access_token` (not the anon key) via `sb.h()` → `_authToken`; the anon key is only the `apikey`. RLS then restricts the DB to authenticated users.
+- Token refresh: a proactive 60s effect refreshes within 5 min of expiry; `sb._req` also refreshes-and-retries once on 401/403 (deduped via `refreshingRef`), and only calls `_onAuthError` (→ sign out) if refresh fails. So a reload after token expiry silently re-auths via the refresh token.
+- `loadAll`, `dbWrite`, and the poll all bail when `!sessionRef.current`. Sign out lives at the bottom of the Lists tab (ListIndex).
+- **Requires RLS** to actually be secure (see Supabase setup notes). The app works the same whether RLS is on or off; RLS is what blocks anyone not logged in.
+
 ## Architecture notes
 
 - All styles in a single `s` object at the bottom of App.tsx
@@ -96,8 +104,19 @@
 
 ## Supabase setup notes
 
-- app_settings table needs: `ALTER TABLE app_settings DISABLE ROW LEVEL SECURITY; GRANT ALL ON app_settings TO anon, authenticated;`
 - recipes table needs columns: `photo TEXT`, `notes TEXT`, `cuisine_tags JSONB DEFAULT '[]'::jsonb`
+- **RLS (security):** every table has RLS enabled with a single "authenticated full access" policy and anon revoked, so only logged-in users can read/write. Run once in the SQL editor:
+  ```sql
+  do $$ declare t text;
+  begin foreach t in array array['meals','recipes','extras','app_settings','lists','list_items'] loop
+    execute format('alter table %I enable row level security', t);
+    execute format('drop policy if exists "authenticated full access" on %I', t);
+    execute format('create policy "authenticated full access" on %I for all to authenticated using (true) with check (true)', t);
+    execute format('revoke all on %I from anon', t);
+    execute format('grant all on %I to authenticated', t);
+  end loop; end $$;
+  ```
+- Accounts: Authentication → Users → Add user (set a password, check Auto Confirm). No in-app sign-up by design.
 
 ## Known patterns
 
