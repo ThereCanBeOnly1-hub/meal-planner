@@ -119,6 +119,13 @@ async function fetchPageContent(url) {
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 12000);
+  // No structured data and almost no text => empty/paywalled/JS-only page.
+  // Bail before spending Claude credits on a page that can't contain a recipe.
+  if (text.length < 200) {
+    const err = new Error("page_fetch_failed");
+    err.code = "page_fetch_failed";
+    throw err;
+  }
   return "Source: " + url + "\n\nPage text:\n" + text;
 }
 
