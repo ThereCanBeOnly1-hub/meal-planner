@@ -2,6 +2,7 @@
 // Vercel serverless function — extracts a structured recipe from a website URL
 // or a cookbook photo using Claude, returning JSON shaped for the recipe editor.
 import Anthropic from "@anthropic-ai/sdk";
+import { requireAuth } from "./_auth";
 
 // Keep these in sync with the tag vocab in src/App.tsx so Claude maps onto
 // tags the app already knows about (it omits anything that doesn't fit).
@@ -108,6 +109,7 @@ export default async function handler(req, res) {
     res.status(405).json({ error: "method_not_allowed", message: "Method not allowed." });
     return;
   }
+  if (!(await requireAuth(req, res))) return;
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {

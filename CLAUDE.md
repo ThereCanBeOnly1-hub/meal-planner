@@ -75,6 +75,7 @@
 
 ## Recipe import
 
+- Both `api/import-recipe.ts` and `api/categorize.ts` require a valid Supabase session: the client sends `Authorization: Bearer <access_token>` and the functions validate it via `requireAuth` (`api/_auth.ts`, calls Supabase `/auth/v1/user`) before spending any Claude credits. Reads `VITE_SUPABASE_URL`/`VITE_SUPABASE_KEY` from the function runtime (no new env vars).
 - `api/import-recipe.ts` — Vercel serverless function (Node). POST `{type:"url",url}` or `{type:"photo",imageBase64}` → `{recipe}` shaped like the editor.
 - URL path: server-fetches the page (browser-like UA), prefers schema.org JSON-LD, falls back to stripped page text, then hands it to Claude (`claude-sonnet-4-6`) with a `save_recipe` tool whose schema mirrors the recipe shape. Photo path: same model via vision.
 - Tag vocab (MEAL_TYPE_TAGS/DIET_TAGS/CUISINE_TAGS) is duplicated in the function. mealTypes is enum-locked to the existing list; diet/cuisine prefer existing tags but may coin at most 1-2 canonical new ones when nothing fits. `RecipeGrid.reconcileImportedTags()` then case-insensitively maps imported diet/cuisine tags onto existing vocab, or registers genuinely-new ones via `onAddCustomTag` so they appear pre-selected in the review editor (user confirms or deletes before saving).

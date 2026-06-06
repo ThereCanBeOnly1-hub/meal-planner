@@ -1272,7 +1272,7 @@ export default function App() {
     setCatStatus("loading");
     try {
       const resp = await fetch("/api/categorize", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${_authToken || ""}` },
         body: JSON.stringify({ names: [...misses], sections: storeLayout }),
       });
       const data = await resp.json().catch(() => ({}));
@@ -2477,7 +2477,7 @@ function ImportModal({ onClose, onImported }) {
   const callImport = async (payload) => {
     const resp = await fetch("/api/import-recipe", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${_authToken || ""}` },
       body: JSON.stringify(payload),
     });
     let data;

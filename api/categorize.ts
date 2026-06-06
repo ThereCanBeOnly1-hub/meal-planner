@@ -3,12 +3,14 @@
 // store's sections using Claude. Called only for items not already cached, so
 // API usage stays minimal.
 import Anthropic from "@anthropic-ai/sdk";
+import { requireAuth } from "./_auth";
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "method_not_allowed", message: "Method not allowed." });
     return;
   }
+  if (!(await requireAuth(req, res))) return;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     res.status(500).json({ error: "not_configured", message: "Categorization isn't configured (missing API key)." });
