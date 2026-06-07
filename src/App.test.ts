@@ -6,6 +6,7 @@ import {
   normalizeImported, addWeeks,
   mealCellEq, mealRow,
   afLayBlocks, generateSlotPlan, layoutPickerOrder,
+  sortListItems,
 } from "./App";
 
 // ─── Time parsing ──────────────────────────────────────────────────────────────
@@ -252,5 +253,41 @@ describe("layoutPickerOrder", () => {
       { id: "other", aisle: null },
     ];
     expect(layoutPickerOrder(layout).map(s => s.id)).toEqual(["produce", "dairy", "aisle5", "other"]);
+  });
+});
+
+// ─── List sorting ────────────────────────────────────────────────────────────────
+describe("sortListItems", () => {
+  const items = [
+    { id: "a", text: "Banana", position: 2, created_at: "2026-01-03" },
+    { id: "b", text: "apple",  position: 0, created_at: "2026-01-01" },
+    { id: "c", text: "Cherry", position: 1, created_at: "2026-01-02" },
+  ];
+  const ids = (mode) => sortListItems(items, mode).map(i => i.id);
+
+  it("manual = position order (default)", () => {
+    expect(ids("manual")).toEqual(["b", "c", "a"]);
+    expect(ids("whatever")).toEqual(["b", "c", "a"]); // unknown falls back to manual
+  });
+  it("a-z / z-a are case-insensitive", () => {
+    expect(ids("az")).toEqual(["b", "a", "c"]); // apple, Banana, Cherry
+    expect(ids("za")).toEqual(["c", "a", "b"]);
+  });
+  it("recent = newest created first, oldest = reverse", () => {
+    expect(ids("recent")).toEqual(["a", "c", "b"]);
+    expect(ids("oldest")).toEqual(["b", "c", "a"]);
+  });
+  it("does not mutate the input array", () => {
+    const arr = [...items];
+    sortListItems(arr, "az");
+    expect(arr.map(i => i.id)).toEqual(["a", "b", "c"]);
+  });
+  it("recent/oldest fall back to position when created_at is missing", () => {
+    const noDates = [
+      { id: "x", text: "x", position: 1 },
+      { id: "y", text: "y", position: 0 },
+    ];
+    expect(sortListItems(noDates, "recent").map(i => i.id)).toEqual(["x", "y"]);
+    expect(sortListItems(noDates, "oldest").map(i => i.id)).toEqual(["y", "x"]);
   });
 });

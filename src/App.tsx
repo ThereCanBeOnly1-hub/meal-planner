@@ -562,6 +562,31 @@ const weekStart = () => {
   return mon.toISOString().split("T")[0];
 };
 
+// List sort options. "manual" = the user's custom order (by position, which the
+// ▲/▼ arrows rewrite); the rest are derived views. recent/oldest fall back to
+// position when created_at is missing (legacy rows / optimistic adds).
+const LIST_SORTS = [
+  { id: "manual", label: "Custom order" },
+  { id: "az", label: "A → Z" },
+  { id: "za", label: "Z → A" },
+  { id: "recent", label: "Newest first" },
+  { id: "oldest", label: "Oldest first" },
+];
+const sortListItems = (items, mode) => {
+  const arr = [...items];
+  const byPos = (a, b) => (a.position ?? 0) - (b.position ?? 0);
+  const byText = (a, b) => (a.text || "").localeCompare(b.text || "", undefined, { sensitivity: "base" });
+  const byCreated = (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""));
+  switch (mode) {
+    case "az": arr.sort((a, b) => byText(a, b) || byPos(a, b)); break;
+    case "za": arr.sort((a, b) => byText(b, a) || byPos(b, a)); break;
+    case "recent": arr.sort((a, b) => byCreated(b, a) || byPos(b, a)); break;
+    case "oldest": arr.sort((a, b) => byCreated(a, b) || byPos(a, b)); break;
+    default: arr.sort(byPos); // manual
+  }
+  return arr;
+};
+
 // Pure helpers exported for unit tests (see src/App.test.ts). No runtime effect
 // on the app; the entry point only uses the default-exported App component.
 export {
@@ -571,7 +596,7 @@ export {
   normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput, parseItemQty, sumSourceMeasures,
   afSample, afLayBlocks, afPlanKey, generateSlotPlan, generateWeekPlan,
   layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart,
-  mealRow, mealCellEq,
+  mealRow, mealCellEq, sortListItems,
 };
 
 // Prop-driven components exported for component tests (see src/components.test.tsx).
@@ -670,6 +695,7 @@ export default function App() {
   const [groceryOpen, setGroceryOpen] = useState(false);
   const groceryPopRef = useRef(false);
   const [ingredientCats, setIngredientCats] = useState({});
+  const [listSorts, setListSorts] = useState({}); // { [listId]: "manual"|"az"|"za"|"recent"|"oldest" }, synced via app_settings
   const [storeLayout, setStoreLayout] = useState(DEFAULT_STORE_LAYOUT);
   const [shoppingOpen, setShoppingOpen] = useState(false);
   const [catStatus, setCatStatus] = useState(""); // "", "loading", or an error message
@@ -913,7 +939,7 @@ export default function App() {
         sb.get("list_items", "?order=created_at.asc").catch(() => []),
       ]);
       const recipeRows = wantRecipes ? await sb.get("recipes", "?order=created_at.asc") : null;
-      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories,store_layout)").catch(() => []);
+      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories,store_layout,list_sorts)").catch(() => []);
 
       const parseWeekRows = (rows) => {
         const w = initialWeek();
@@ -954,7 +980,7 @@ export default function App() {
         id: l.id, name: l.name, type: l.type || "custom", icon: l.icon || "📝", position: l.position ?? 0,
         items: (itemsByList[l.id] || []).map(it => {
           const q = parseItemQty(it.qty);
-          return { id: it.id, text: it.text || "", checked: !!it.checked, position: it.position ?? 0,
+          return { id: it.id, text: it.text || "", checked: !!it.checked, position: it.position ?? 0, created_at: it.created_at || null,
             category: it.category || "", measures: q.measures, manual: q.manual, sources: parseJsonArr(it.source_recipe_id) };
         }).sort(byPos),
       }));
@@ -990,11 +1016,12 @@ export default function App() {
       const customTagsVal = settingsRows.find(r => r.key === "custom_tags")?.value || null;
       const catsVal = settingsRows.find(r => r.key === "ingredient_categories")?.value || null;
       const layoutVal = settingsRows.find(r => r.key === "store_layout")?.value || null;
+      const sortsVal = settingsRows.find(r => r.key === "list_sorts")?.value || null;
 
       // Skip all setState when nothing changed since the last load (avoids a
       // full re-render on every poll). Recipes fall back to the current ref when
       // not fetched, so skipping their fetch doesn't register as a change.
-      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, mappedRecipes ?? recipesRef.current]);
+      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, sortsVal, mappedRecipes ?? recipesRef.current]);
       if (sig === lastPayloadSigRef.current) { hasLoadedRef.current = true; setSyncStatus("synced"); return; }
       lastPayloadSigRef.current = sig;
 
@@ -1010,6 +1037,7 @@ export default function App() {
       if (customTagsVal) setCustomTags(prev => ({ ...prev, ...customTagsVal }));
       if (catsVal) setIngredientCats(catsVal);
       if (Array.isArray(layoutVal) && layoutVal.length) setStoreLayout(layoutVal);
+      if (sortsVal && typeof sortsVal === "object") setListSorts(sortsVal);
 
       hasLoadedRef.current = true;
       setSyncStatus("synced");
@@ -1111,7 +1139,7 @@ export default function App() {
     const t = text.trim(); if (!t) return;
     const list = lists.find(l => l.id === listId);
     const pos = (list ? list.items.reduce((m, i) => Math.max(m, i.position || 0), 0) : 0) + 1;
-    const item = { id: genId(), text: t, checked: false, position: pos, category: "", measures: [], manual: false, sources: [] };
+    const item = { id: genId(), text: t, checked: false, position: pos, created_at: new Date().toISOString(), category: "", measures: [], manual: false, sources: [] };
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: [...l.items, item] } : l));
     trackPending(item.id, { kind: "item", listId, item });
     syncWrite("Couldn't save the item", () => sb.upsert("list_items", [listItemToRow(item, listId)], "id"), [item.id]);
@@ -1127,6 +1155,32 @@ export default function App() {
     setLists(prev => prev.map(l => l.id === listId ? { ...l, items: l.items.filter(it => it.id !== itemId) } : l));
     trackPending(itemId, { kind: "item", listId, deleted: true });
     syncWrite("Couldn't delete the item", () => sb.del("list_items", `id=eq.${itemId}`), [itemId]);
+  };
+  // Custom (manual) reorder via ▲/▼. Renumbers the moved item's display group
+  // (siblingIds, in current order) to 0..n so positions stay clean & distinct;
+  // grouping is by source type, so within-group positions can safely overlap
+  // other groups. Only the rows whose position actually changed are written.
+  const moveListItem = (listId, itemId, dir, siblingIds) => {
+    const idx = siblingIds.indexOf(itemId);
+    const j = idx + dir;
+    if (idx < 0 || j < 0 || j >= siblingIds.length) return;
+    const order = [...siblingIds];
+    [order[idx], order[j]] = [order[j], order[idx]];
+    const posOf = new Map(order.map((id, i) => [id, i]));
+    const list = lists.find(l => l.id === listId); if (!list) return;
+    const rows = [], ids = [];
+    const nextItems = list.items.map(it => {
+      if (!posOf.has(it.id)) return it;
+      const np = posOf.get(it.id);
+      if (np === it.position) return it;
+      const u = { ...it, position: np };
+      rows.push(listItemToRow(u, listId)); ids.push(it.id);
+      trackPending(it.id, { kind: "item", listId, item: u });
+      return u;
+    });
+    if (!rows.length) return;
+    setLists(prev => prev.map(l => l.id === listId ? { ...l, items: nextItems } : l));
+    syncWrite("Couldn't reorder the list", () => sb.upsert("list_items", rows, "id"), ids);
   };
   const clearListItems = (listId, onlyChecked) => {
     const list = lists.find(l => l.id === listId);
@@ -1181,7 +1235,7 @@ export default function App() {
         merged++;
       } else {
         const sources = [...c.byRecipe.values()];
-        const item = { id: genId(), text: c.text, checked: false, position: ++maxPos, category: "", manual: false, measures: sumSourceMeasures(sources), sources };
+        const item = { id: genId(), text: c.text, checked: false, position: ++maxPos, created_at: new Date().toISOString(), category: "", manual: false, measures: sumSourceMeasures(sources), sources };
         newItems.push(item);
         rows.push(listItemToRow(item, grocery.id));
         trackPending(item.id, { kind: "item", listId: grocery.id, item });
@@ -1295,6 +1349,13 @@ export default function App() {
   const openShopping = () => { setShoppingOpen(true); setCatStatus(""); history.pushState({ overlay: "shopping" }, ""); categorizeGroceryItems(); };
   const closeShopping = () => { setShoppingOpen(false); if (!shoppingPopRef.current) history.back(); };
   const saveStoreLayout = (next) => { setStoreLayout(next); dbWrite("Couldn't save the store layout", () => sb.upsert("app_settings", [{ key: "store_layout", value: next }], "key")); };
+  const setListSort = (listId, mode) => {
+    setListSorts(prev => {
+      const next = { ...prev, [listId]: mode };
+      dbWrite("Couldn't save the sort order", () => sb.upsert("app_settings", [{ key: "list_sorts", value: next }], "key"));
+      return next;
+    });
+  };
 
   if (isConfigured && !session) return <Login onSignIn={handleSignIn} />;
 
@@ -1347,6 +1408,7 @@ export default function App() {
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
             onSetItemQty={setItemQty} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping}
+            listSorts={listSorts} onSetSort={setListSort} onMoveItem={moveListItem}
             userEmail={session?.user?.email} onSignOut={signOut} />
         )}
       </div>
@@ -1470,11 +1532,18 @@ function ShoppingMode({ list, cats, catStatus, layout, onToggle, onSetAisle, onA
   };
   const submitAdd = () => { const t = addInput.trim(); if (!t) return; onAddItem(list.id, t); setAddInput(""); };
 
-  const unchecked = items.filter(i => !i.checked);
+  // The add box doubles as a search: typing filters the list so you can see if
+  // something's already on it (and tap to re-check) without scrolling.
+  const q = addInput.trim().toLowerCase();
+  const matches = (it) => !q || (it.text || "").toLowerCase().includes(q);
+  const byText = (a, b) => (a.text || "").localeCompare(b.text || "", undefined, { sensitivity: "base" });
+
+  const unchecked = items.filter(i => !i.checked && matches(i));
   const bySection = {};
   unchecked.forEach(it => { const sec = catFor(it); (bySection[sec] ||= []).push(it); });
+  Object.values(bySection).forEach(arr => arr.sort(byText)); // alphabetical within each aisle
   const orderedSections = layout.filter(sec => bySection[sec.id]?.length);
-  const checkedItems = items.filter(i => i.checked)
+  const checkedItems = items.filter(i => i.checked && matches(i))
     .sort((a, b) => { const ia = checkOrder.indexOf(a.id), ib = checkOrder.indexOf(b.id); return (ia === -1 ? Infinity : ia) - (ib === -1 ? Infinity : ib); });
 
   const row = (it) => {
@@ -1508,6 +1577,8 @@ function ShoppingMode({ list, cats, catStatus, layout, onToggle, onSetAisle, onA
       <div style={s.shopBody}>
         {total === 0 ? (
           <div style={s.listEmptyState}><div style={{fontSize:30,marginBottom:8}}>🛒</div><div style={s.listEmptyStateText}>Grocery list is empty.</div></div>
+        ) : q && orderedSections.length === 0 && checkedItems.length === 0 ? (
+          <div style={s.listSearchEmpty}>No matches — press Add to add “{addInput.trim()}”.</div>
         ) : (
           <>
             {orderedSections.map(sec => (
@@ -1531,8 +1602,11 @@ function ShoppingMode({ list, cats, catStatus, layout, onToggle, onSetAisle, onA
       </div>
 
       <div style={s.shopAddBar}>
-        <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder="Add an item…" value={addInput}
-          onChange={e => setAddInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submitAdd(); }} />
+        <div style={{position:"relative",flex:1,display:"flex",alignItems:"center"}}>
+          <input style={{...s.modalInput,marginBottom:0,flex:1,...(addInput?{paddingRight:30}:{})}} placeholder="Add or search…" value={addInput}
+            onChange={e => setAddInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submitAdd(); if (e.key === "Escape") setAddInput(""); }} />
+          {addInput && <button style={s.listSearchClear} className="list-item-del" onClick={() => setAddInput("")} title="Clear">✕</button>}
+        </div>
         <button style={{...s.btnSave,...(addInput.trim()?{}:s.btnDisabled)}} onClick={submitAdd}>Add</button>
       </div>
 
@@ -3019,7 +3093,7 @@ const computeDupKeys = (items) => {
 
 const abbrev = (str, n) => (str && str.length > n ? str.slice(0, n - 1) + "…" : str || "");
 
-function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEditable }) {
+function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEditable, showArrows, isFirst, isLast, onMoveUp, onMoveDown }) {
   const [showSrc, setShowSrc] = useState(false);
   const [editingQty, setEditingQty] = useState(false);
   const [qtyInput, setQtyInput] = useState("");
@@ -3059,6 +3133,12 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
         )}
       </div>
       {hasSrc && <button style={s.listSrcIcon} className="list-src-icon" onClick={() => setShowSrc(v => !v)} title={sources.map(s => s.name).join(", ")}>🍽</button>}
+      {showArrows && (
+        <div style={s.listReorder}>
+          <button style={{...s.listReorderBtn,...(isFirst?s.listReorderBtnDim:{})}} className="list-reorder-btn" disabled={isFirst} onClick={onMoveUp} title="Move up">▲</button>
+          <button style={{...s.listReorderBtn,...(isLast?s.listReorderBtnDim:{})}} className="list-reorder-btn" disabled={isLast} onClick={onMoveDown} title="Move down">▼</button>
+        </div>
+      )}
       <button style={s.listItemDel} className="list-item-del" onClick={() => onDelete(listId, item.id)}>✕</button>
     </div>
   );
@@ -3066,38 +3146,69 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
 
 // Shared renderer: manual items pinned on top, a thin divider, then recipe-sourced
 // items, then checked items at the bottom.
-function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditable }) {
+function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditable, sortMode = "manual", filter = "", onMove }) {
   const dupKeys = computeDupKeys(items);
+  const q = (filter || "").trim().toLowerCase();
+  const matches = (it) => !q || (it.text || "").toLowerCase().includes(q);
+  // Arrows only make sense in custom order, with no search filter narrowing the view.
+  const arrowsOn = sortMode === "manual" && !q && !!onMove;
+
+  // `group` (when given) is the ordered array the item lives in — used so the
+  // ▲/▼ arrows know their bounds and can renumber that group on move.
+  const row = (it, group) => {
+    const ids = group ? group.map(x => x.id) : null;
+    const idx = ids ? ids.indexOf(it.id) : -1;
+    return <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))}
+      onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} qtyEditable={qtyEditable}
+      showArrows={arrowsOn && !!group} isFirst={idx === 0} isLast={idx === (ids ? ids.length - 1 : 0)}
+      onMoveUp={() => onMove(listId, it.id, -1, ids)} onMoveDown={() => onMove(listId, it.id, +1, ids)} />;
+  };
+
+  // Search view: one flat matching list (incl. checked), so it's easy to see if
+  // something's already on the list and to re-check/uncheck it in place.
+  if (q) {
+    const um = sortListItems(items.filter(i => !i.checked && matches(i)), sortMode);
+    const cm = sortListItems(items.filter(i => i.checked && matches(i)), sortMode);
+    return (
+      <div style={s.listItems}>
+        {um.length === 0 && cm.length === 0 && <div style={s.listSearchEmpty}>No matches — press Add to add “{filter.trim()}”.</div>}
+        {um.map(it => row(it))}
+        {cm.length > 0 && <div style={s.listCheckedDivider}>{cm.length} done</div>}
+        {cm.map(it => row(it))}
+      </div>
+    );
+  }
+
+  const checked = sortListItems(items.filter(i => i.checked), sortMode);
   const unchecked = items.filter(i => !i.checked);
-  const checked = items.filter(i => i.checked);
-  const manual = unchecked.filter(i => !(i.sources && i.sources.length));            // added by you
-  const adjusted = unchecked.filter(i => i.sources && i.sources.length && i.manual); // recipe item, quantity overridden
-  const recipe = unchecked.filter(i => i.sources && i.sources.length && !i.manual);  // from recipes
-  const rowOf = (it) => <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))} onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} qtyEditable={qtyEditable} />;
+  const manual = sortListItems(unchecked.filter(i => !(i.sources && i.sources.length)), sortMode);            // added by you
+  const adjusted = sortListItems(unchecked.filter(i => i.sources && i.sources.length && i.manual), sortMode); // recipe item, quantity overridden
+  const recipe = sortListItems(unchecked.filter(i => i.sources && i.sources.length && !i.manual), sortMode);  // from recipes
   const aboveRecipe = manual.length > 0 || adjusted.length > 0;
   return (
     <div style={s.listItems}>
-      {manual.map(rowOf)}
+      {manual.map(it => row(it, manual))}
       {adjusted.length > 0 && <div style={s.listSectionHead}>Adjusted</div>}
-      {adjusted.map(rowOf)}
+      {adjusted.map(it => row(it, adjusted))}
       {recipe.length > 0 && aboveRecipe && <div style={s.listSectionHead}>From recipes</div>}
-      {recipe.map(rowOf)}
+      {recipe.map(it => row(it, recipe))}
       {checked.length > 0 && (
         <>
           <div style={s.listCheckedDivider}>{checked.length} done</div>
-          {checked.map(rowOf)}
+          {checked.map(it => row(it))}
         </>
       )}
     </div>
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onShopping, userEmail, onSignOut }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onShopping, listSorts, onSetSort, onMoveItem, userEmail, onSignOut }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
-      onSetItemQty={onSetItemQty} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping} />;
+      onSetItemQty={onSetItemQty} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping}
+      sortMode={listSorts?.[open.id] || "manual"} onSetSort={onSetSort} onMoveItem={onMoveItem} />;
   }
   return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} userEmail={userEmail} onSignOut={onSignOut} />;
 }
@@ -3176,9 +3287,10 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList, userEmail, onSignOut 
   );
 }
 
-function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onUpdateList, onDeleteList, onShopping }) {
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onUpdateList, onDeleteList, onShopping, sortMode = "manual", onSetSort, onMoveItem }) {
   const [input, setInput] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(list.name);
   const [dbrOpen, setDbrOpen] = useState(false);       // "delete by recipe" modal
@@ -3252,11 +3364,36 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
         )}
 
         <div style={s.listAddRow}>
-          <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder="Add an item…" value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+          <div style={{position:"relative",flex:1,display:"flex",alignItems:"center"}}>
+            <input style={{...s.modalInput,marginBottom:0,flex:1,...(input?{paddingRight:30}:{})}} placeholder="Add or search…" value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") submit(); if (e.key === "Escape") setInput(""); }} />
+            {input && <button style={s.listSearchClear} className="list-item-del" onClick={() => setInput("")} title="Clear">✕</button>}
+          </div>
           <button style={{...s.btnSave,...(input.trim()?{}:s.btnDisabled)}} onClick={submit}>Add</button>
         </div>
+
+        {list.items.length > 1 && (
+          <div style={s.listSortRow}>
+            <div style={{position:"relative"}}>
+              <button style={s.listSortBtn} className="list-sort-btn" onClick={() => setSortOpen(o => !o)}>
+                ⇅ {LIST_SORTS.find(o => o.id === sortMode)?.label || "Custom order"} ▾
+              </button>
+              {sortOpen && (
+                <>
+                  <div style={s.listMenuBackdrop} onClick={() => setSortOpen(false)} />
+                  <div style={s.listSortMenu}>
+                    {LIST_SORTS.map(o => (
+                      <button key={o.id} style={{...s.listMenuItem,...(o.id===sortMode?s.listSortItemOn:{})}} className="list-menu-item"
+                        onClick={() => { onSetSort && onSetSort(list.id, o.id); setSortOpen(false); }}>{o.id===sortMode ? "✓ " : ""}{o.label}</button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+            {sortMode === "manual" && !input && <span style={s.listSortHint}>Use ▲▼ to arrange</span>}
+          </div>
+        )}
 
         {list.items.length === 0 ? (
           <div style={s.listEmptyState}>
@@ -3264,7 +3401,8 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
             <div style={s.listEmptyStateText}>{isGrocery ? "Your grocery list is empty. Add items above." : "Nothing here yet. Add your first item above."}</div>
           </div>
         ) : (
-          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} qtyEditable={isGrocery} />
+          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} qtyEditable={isGrocery}
+            sortMode={sortMode} filter={input} onMove={onMoveItem} />
         )}
         <div style={{height:40}} />
       </div>
@@ -3717,6 +3855,20 @@ const s = {
   listMenuBackdrop: { position:"fixed", inset:0, zIndex:40 },
   listMenu: { position:"absolute", top:"110%", right:0, background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:11, padding:6, minWidth:160, boxShadow:"0 14px 36px rgba(0,0,0,0.5)", zIndex:41, display:"flex", flexDirection:"column", gap:2 },
   listMenuItem: { background:"none", border:"none", textAlign:"left", padding:"9px 11px", borderRadius:7, fontSize:13.5, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
+
+  // Reorder arrows (custom order)
+  listReorder: { display:"flex", flexDirection:"column", flexShrink:0, marginLeft:2 },
+  listReorderBtn: { background:"none", border:"none", color:"#9a7f60", fontSize:9, lineHeight:1, cursor:"pointer", padding:"2px 4px" },
+  listReorderBtnDim: { color:"#3a2e22", cursor:"default" },
+  // Search clear ✕ inside the add box
+  listSearchClear: { position:"absolute", right:6, background:"none", border:"none", color:"#7a6448", fontSize:12, cursor:"pointer", padding:"4px 5px", lineHeight:1 },
+  listSearchEmpty: { fontSize:13, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", textAlign:"center", padding:"20px 12px", lineHeight:1.5 },
+  // Sort selector
+  listSortRow: { display:"flex", alignItems:"center", gap:10, margin:"12px 0 2px" },
+  listSortBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"6px 11px", fontSize:12.5, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, whiteSpace:"nowrap" },
+  listSortMenu: { position:"absolute", top:"110%", left:0, background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:11, padding:6, minWidth:150, boxShadow:"0 14px 36px rgba(0,0,0,0.5)", zIndex:41, display:"flex", flexDirection:"column", gap:2 },
+  listSortItemOn: { background:"#33281b", color:"#f4c97a", fontWeight:700 },
+  listSortHint: { fontSize:11, color:"#7a6448", fontFamily:"'DM Sans',sans-serif" },
   dbrHint: { fontSize:12.5, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginBottom:12, lineHeight:1.45 },
   dbrList: { display:"flex", flexDirection:"column", gap:5, maxHeight:"50vh", overflowY:"auto" },
   dbrRow: { display:"flex", alignItems:"center", gap:11, background:"#1c1712", border:"1.5px solid #3a2e22", borderRadius:9, padding:"10px 12px", cursor:"pointer", textAlign:"left", width:"100%" },
@@ -3817,6 +3969,8 @@ const css = `
   .layout-move:hover { background: #3a2e22 !important; color: #f4c97a !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
+  .list-reorder-btn:not(:disabled):hover { color: #f4c97a !important; }
+  .list-sort-btn:hover { border-color: #c8a878 !important; }
   .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }
   .grocery-fab:hover { transform: scale(1.06); }
   .save-error-retry:hover { opacity: 0.9; }

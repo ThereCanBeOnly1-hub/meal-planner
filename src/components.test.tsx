@@ -77,7 +77,7 @@ describe("ListDetail", () => {
   it("adds an item to the right list", () => {
     const onAddItem = vi.fn();
     renderDetail({ id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [] }, { onAddItem });
-    fireEvent.change(screen.getByPlaceholderText("Add an item…"), { target: { value: "Socks" } });
+    fireEvent.change(screen.getByPlaceholderText("Add or search…"), { target: { value: "Socks" } });
     fireEvent.click(screen.getByText("Add"));
     expect(onAddItem).toHaveBeenCalledWith("L1", "Socks");
   });
@@ -104,6 +104,42 @@ describe("ListDetail", () => {
     expect(onClearItems).not.toHaveBeenCalled();      // not until confirmed
     fireEvent.click(screen.getByText("Delete checked")); // confirm button in the modal
     expect(onClearItems).toHaveBeenCalledWith("L1", true);
+  });
+
+  it("the add box filters the list as you type (search), Add still adds", () => {
+    const onAddItem = vi.fn();
+    const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [
+      { id: "a", text: "Socks", checked: false, measures: [], sources: [] },
+      { id: "b", text: "Toothbrush", checked: false, measures: [], sources: [] },
+    ] };
+    renderDetail(list, { onAddItem });
+    fireEvent.change(screen.getByPlaceholderText("Add or search…"), { target: { value: "sock" } });
+    expect(screen.getByText("Socks")).toBeTruthy();
+    expect(screen.queryByText("Toothbrush")).toBeNull(); // filtered out
+    fireEvent.click(screen.getByText("Add"));            // Enter/Add still adds verbatim
+    expect(onAddItem).toHaveBeenCalledWith("L1", "sock");
+  });
+
+  it("shows reorder arrows in custom order and moves an item", () => {
+    const onMoveItem = vi.fn();
+    const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [
+      { id: "a", text: "Apple", checked: false, position: 0, measures: [], sources: [] },
+      { id: "b", text: "Banana", checked: false, position: 1, measures: [], sources: [] },
+    ] };
+    const { container } = renderDetail(list, { sortMode: "manual", onMoveItem });
+    const downs = container.querySelectorAll(".list-reorder-btn");
+    expect(downs.length).toBe(4); // up+down per row
+    fireEvent.click(container.querySelector(".list-reorder-btn:not([disabled])")); // first enabled = item a "down"
+    expect(onMoveItem).toHaveBeenCalledWith("L1", "a", 1, ["a", "b"]);
+  });
+
+  it("hides reorder arrows when not in custom order", () => {
+    const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [
+      { id: "a", text: "Apple", checked: false, position: 0, measures: [], sources: [] },
+      { id: "b", text: "Banana", checked: false, position: 1, measures: [], sources: [] },
+    ] };
+    const { container } = renderDetail(list, { sortMode: "az", onMoveItem: vi.fn() });
+    expect(container.querySelectorAll(".list-reorder-btn").length).toBe(0);
   });
 
   it("delete-by-recipe removes only the selected recipe's ingredients", () => {
