@@ -1229,6 +1229,7 @@ export default function App() {
           else existing.sources.push(sc);
         });
         if (!existing.manual) existing.measures = sumSourceMeasures(existing.sources);
+        existing.checked = false;                  // re-adding it means you need to buy it again → uncross
         rows.push(listItemToRow(existing, grocery.id));
         trackPending(existing.id, { kind: "item", listId: grocery.id, item: existing });
         changedIds.push(existing.id);
