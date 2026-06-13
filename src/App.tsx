@@ -1223,6 +1223,11 @@ export default function App() {
     candByKey.forEach((c, key) => {
       const existing = items.find(it => (it.sources && it.sources.length > 0) && groceryKey(it.text) === key);
       if (existing) {
+        // Reviving a crossed-off recipe line: its old sources are from a
+        // completed trip, so drop them first — the total should reflect only
+        // what this add needs, not last week's leftover amounts. (Manual
+        // overrides are the user's explicit total, so leave those untouched.)
+        if (existing.checked && !existing.manual) existing.sources = [];
         c.byRecipe.forEach((sc) => {
           const ex = existing.sources.find(s => s.id === sc.id);
           if (ex) ex.measures = sc.measures;       // same recipe re-added → fixed amount (no double-count)
