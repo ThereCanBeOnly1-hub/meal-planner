@@ -2632,7 +2632,7 @@ function ImportModal({ onClose, onImported }) {
               <div style={{fontSize:30,marginBottom:6}}>📷</div>
               <div style={s.importPhotoDropText}>Take or choose a photo</div>
               <div style={s.importPhotoDropSub}>A clear shot of the full recipe page works best.</div>
-              <input type="file" accept="image/*" capture="environment" style={{display:"none"}}
+              <input type="file" accept="image/*" style={{display:"none"}}
                 onChange={e=>{const f=e.target.files?.[0]; importPhoto(f); e.target.value="";}} />
             </label>
           </>
