@@ -9,7 +9,7 @@
 ## Supabase tables
 
 - **meals**: week_start, day, slot, meal_name, thaw, thaw_days, recipe_id, updated_at
-- **recipes**: id, name, description, url, photo (TEXT), notes (TEXT), prep_time, cook_time, base_servings, meal_types (jsonb), diet_tags (jsonb), cuisine_tags (jsonb DEFAULT '[]'::jsonb), ingredients (jsonb), steps (jsonb), updated_at
+- **recipes**: id, name, description, url, photo (TEXT), notes (TEXT), prep_time, cook_time, base_servings, meal_types (jsonb), diet_tags (jsonb), cuisine_tags (jsonb DEFAULT '[]'::jsonb), ingredients (jsonb), steps (jsonb), status (TEXT DEFAULT 'want' — want|made|favorite), updated_at
 - **extras**: week_start, type (snack|dessert), name
 - **app_settings**: key (TEXT PK), value (jsonb) — stores custom_tags: {mealtypes:[], diets:[], cuisines:[]}
 - **lists**: id (TEXT PK), name, type ('grocery'|'custom'), icon, position, created_at, updated_at
@@ -70,7 +70,9 @@
 - **GroceryDrawer**: app-level slide-out grocery quick-panel, opened by a floating 🛒 button (hidden on the Lists tab); reuses the App-level list ops so adds/checks sync live. Uses overlay history pattern (`{overlay:"grocery"}`); "Open full list →" jumps to the Lists tab grocery view
 - **ShoppingMode**: full-screen in-store view (button on grocery list). Groups items by store aisle in walk order (items **sorted alphabetically within each aisle**), big tap rows, qty shown, progress bar, checked items drop to "In the cart" newest-first, 📍 reassigns an item's aisle (remembered). Add box doubles as a live search/filter (progress counts stay on the full list). Overlay history pattern (`{overlay:"shopping"}`)
 - **TagPicker**: reusable tag selector used in RecipeEditor, supports custom tags via props; "Manage" toggle reveals an ✕ on custom chips to delete them (built-in tags can't be deleted). Deleting calls `deleteCustomTag`, which removes the tag from the vocab AND strips it from every recipe using it (via `recipeToRow` bulk upsert), so no recipe is left referencing a removed tag.
-- **RecipeGrid**: recipe list with collapsed Meal/Diet/Cuisine filter dropdowns; header has Import + New buttons
+- **RecipeGrid**: recipe list with collapsed Meal/Diet/Cuisine filter dropdowns; header has Import + New buttons. Also: search matches **name + ingredients**; sort (Newest/A–Z/Prep time, `RECIPE_SORTS` + pure `sortRecipes`, remembered in localStorage `mealplanner_recipe_sort`); **status filter chips** (All/Want to try/Made/Favorite). Each card shows a tap-to-cycle **status badge** (`nextRecipeStatus`: want→made→favorite) and a **"last made"** line (`lastMadeLabel`, only when planned in a past week).
+- **Recipe status** is a single 3-state field `status` (want|made|favorite, `RECIPE_STATUSES`/`statusMeta`). New & imported recipes default to `want`; existing rows backfilled to `made` (see schema notes). `setRecipeStatus(id,status)` does a **minimal upsert** (`{id,status,updated_at}`) so a quick toggle doesn't re-send the base64 photo. RecipeDetail has an explicit Want/Made/Favorite picker; `RecipesView` resolves the live recipe from state by id so detail reflects status changes immediately.
+- **"Last made"**: a `lastMade` map (recipeId → most recent *past* `week_start`) is fetched from the `meals` table only while the Recipes tab is open (a small `recipe_id,week_start` projection, reduced client-side; isolated from `loadAll`/sig). Not the same as "actually cooked" — it's "last planned in a past week".
 - **ImportModal**: "From link" / "From photo" recipe import; calls `/api/import-recipe`, normalizes result via `normalizeImported()`, then opens RecipeEditor pre-filled for review
 - **RecipeDetail**: hero photo, meta, ingredients (3-col), steps with dividers, notes at bottom
 - **RecipeEditor**: full recipe form including photo upload (canvas-resized to 600px JPEG)
@@ -107,7 +109,8 @@
 
 ## Supabase setup notes
 
-- recipes table needs columns: `photo TEXT`, `notes TEXT`, `cuisine_tags JSONB DEFAULT '[]'::jsonb`
+- recipes table needs columns: `photo TEXT`, `notes TEXT`, `cuisine_tags JSONB DEFAULT '[]'::jsonb`, `status TEXT DEFAULT 'want'`
+- **recipe status migration** (run once): `alter table recipes add column if not exists status text not null default 'want'; update recipes set status = 'made';` — new/imported recipes default to "want to try"; the update backfills all *existing* recipes to "made".
 - **RLS (security):** every table has RLS enabled with a single "authenticated full access" policy and anon revoked, so only logged-in users can read/write. Run once in the SQL editor:
   ```sql
   do $$ declare t text;

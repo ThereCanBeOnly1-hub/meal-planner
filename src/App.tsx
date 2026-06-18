@@ -208,7 +208,7 @@ const newRecipe = () => ({
   prepTime: "", cookTime: "", baseServings: 4,
   ingredients: [{ id: Date.now().toString(), amount: "", unit: "", name: "" }],
   steps: [{ id: Date.now().toString(), text: "" }],
-  mealTypes: [], dietTags: [], cuisineTags: [],
+  mealTypes: [], dietTags: [], cuisineTags: [], status: "want",
 });
 
 // Merge a recipe extracted by /api/import-recipe into an editable recipe shape.
@@ -247,7 +247,7 @@ const recipeToRow = (r) => ({
   id: r.id, name: r.name, description: r.description, url: r.url, photo: r.photo, notes: r.notes,
   prep_time: r.prepTime, cook_time: r.cookTime, base_servings: r.baseServings,
   meal_types: r.mealTypes, diet_tags: r.dietTags, cuisine_tags: r.cuisineTags,
-  ingredients: r.ingredients, steps: r.steps, updated_at: new Date().toISOString(),
+  ingredients: r.ingredients, steps: r.steps, status: r.status || "want", updated_at: new Date().toISOString(),
 });
 
 // Custom-tag category key -> recipe field holding that tag list.
@@ -587,6 +587,45 @@ const sortListItems = (items, mode) => {
   return arr;
 };
 
+// Recipe status: a single 3-state field (Want to try → Made → Favorite). New &
+// imported recipes default to "want"; existing rows are backfilled to "made".
+const RECIPE_STATUSES = [
+  { id: "want", label: "Want to try", icon: "🔖" },
+  { id: "made", label: "Made", icon: "✅" },
+  { id: "favorite", label: "Favorite", icon: "⭐" },
+];
+const statusMeta = (id) => RECIPE_STATUSES.find(s => s.id === id) || RECIPE_STATUSES[0];
+const nextRecipeStatus = (cur) => {
+  const order = RECIPE_STATUSES.map(s => s.id);
+  return order[(order.indexOf(cur) + 1) % order.length]; // -1 → index 0 → "want"
+};
+
+const RECIPE_SORTS = [
+  { id: "newest", label: "Newest" },
+  { id: "az", label: "A–Z" },
+  { id: "prep", label: "Prep time" },
+];
+const sortRecipes = (recipes, mode) => {
+  const arr = [...recipes];
+  const created = (r) => r.created_at || "9999"; // unsaved/new → treat as newest
+  if (mode === "az") arr.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }));
+  else if (mode === "prep") arr.sort((a, b) => (parseMinutes(a.prepTime) || Infinity) - (parseMinutes(b.prepTime) || Infinity));
+  else arr.sort((a, b) => String(created(b)).localeCompare(String(created(a)))); // newest first
+  return arr;
+};
+
+// "Last made" = most recent past week this recipe was planned (from the meals
+// table). Relative for recent weeks, falls back to a month/year for older.
+const lastMadeLabel = (ws, nowMonday) => {
+  if (!ws) return null;
+  const a = new Date(ws + "T00:00:00"), b = new Date((nowMonday || weekStart()) + "T00:00:00");
+  const weeks = Math.round((b - a) / (7 * 86400000));
+  if (weeks <= 0) return "Made this week";
+  if (weeks === 1) return "Made last week";
+  if (weeks < 9) return `Made ${weeks} weeks ago`;
+  return "Last made " + a.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+};
+
 // Pure helpers exported for unit tests (see src/App.test.ts). No runtime effect
 // on the app; the entry point only uses the default-exported App component.
 export {
@@ -597,6 +636,7 @@ export {
   afSample, afLayBlocks, afPlanKey, generateSlotPlan, generateWeekPlan,
   layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart,
   mealRow, mealCellEq, sortListItems,
+  sortRecipes, nextRecipeStatus, lastMadeLabel,
 };
 
 // Prop-driven components exported for component tests (see src/components.test.tsx).
@@ -678,6 +718,7 @@ export default function App() {
 
   const [tab, setTab] = useState("planner");
   const [recipes, setRecipes] = useState([]);
+  const [lastMade, setLastMade] = useState({}); // recipeId → most recent past planned week_start (for the card's "last made" line)
   const [recipeView, setRecipeView] = useState(null);
   const [week, setWeek] = useState(initialWeek());
   const [snacks, setSnacks] = useState([]);
@@ -967,6 +1008,7 @@ export default function App() {
         baseServings: r.base_servings || 4,
         mealTypes: r.meal_types || [], dietTags: r.diet_tags || [], cuisineTags: r.cuisine_tags || [],
         ingredients: r.ingredients || [], steps: r.steps || [],
+        status: r.status || "want", created_at: r.created_at || null,
       })) : null;
 
       const serverSnacks = extrasRows.filter(e => e.type === "snack").map(e => e.name);
@@ -1096,6 +1138,33 @@ export default function App() {
     navigate("recipes", null);
     dbWrite("Couldn't delete the recipe", () => sb.del("recipes", `id=eq.${id}`));
   };
+  // Update only the status (Want to try / Made / Favorite). Minimal upsert so we
+  // don't re-send the recipe's base64 photo on every quick toggle.
+  const setRecipeStatus = (id, status) => {
+    setRecipes(prev => prev.map(r => r.id === id ? { ...r, status } : r));
+    dbWrite("Couldn't update the recipe status", () => sb.upsert("recipes", [{ id, status, updated_at: new Date().toISOString() }]));
+  };
+
+  // When the Recipes tab is open, pull a tiny recipe_id/week_start projection of
+  // all planned meals and reduce it to each recipe's most recent *past* week.
+  // Cheap, isolated from the sync machinery, refetched on each tab visit.
+  useEffect(() => {
+    if (!isConfigured || !session || tab !== "recipes") return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await sb.get("meals", "?select=recipe_id,week_start&recipe_id=not.is.null");
+        const cur = weekStart();
+        const m = {};
+        rows.forEach(r => {
+          if (!r.recipe_id || !r.week_start || r.week_start > cur) return; // ignore future-planned weeks
+          if (!m[r.recipe_id] || r.week_start > m[r.recipe_id]) m[r.recipe_id] = r.week_start;
+        });
+        if (!cancelled) setLastMade(m);
+      } catch { /* non-critical; card just omits the line */ }
+    })();
+    return () => { cancelled = true; };
+  }, [tab, session]);
 
   const recipesBySlot = (slot) => recipes.filter(r => r.mealTypes.includes(slot)).map(r => r.name);
 
@@ -1404,7 +1473,7 @@ export default function App() {
         )}
         {tab === "recipes" && (
           <RecipesView recipes={recipes} view={recipeView} setView={(v) => navigate("recipes", v)}
-            onSave={saveRecipe} onDelete={deleteRecipe}
+            onSave={saveRecipe} onDelete={deleteRecipe} onSetStatus={setRecipeStatus} lastMade={lastMade}
             customTags={customTags} onAddCustomTag={addCustomTag} onDeleteCustomTag={deleteCustomTag}
             onAddToGrocery={addRecipeToGrocery} onRemoveFromGrocery={removeRecipeFromGrocery} groceryCountFor={groceryCountForRecipe} />
         )}
@@ -2471,10 +2540,13 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
 }
 
 // ─── Recipes View ─────────────────────────────────────────────────────────────
-function RecipesView({ recipes, view, setView, onSave, onDelete, customTags, onAddCustomTag, onDeleteCustomTag, onAddToGrocery, onRemoveFromGrocery, groceryCountFor }) {
+function RecipesView({ recipes, view, setView, onSave, onDelete, onSetStatus, lastMade, customTags, onAddCustomTag, onDeleteCustomTag, onAddToGrocery, onRemoveFromGrocery, groceryCountFor }) {
   if (view && view.edit) return <RecipeEditor recipe={view.recipe} onSave={onSave} onCancel={()=>setView(recipes.some(r=>r.id===view.recipe?.id)?{recipe:view.recipe}:null)} customTags={customTags} onAddCustomTag={onAddCustomTag} onDeleteCustomTag={onDeleteCustomTag} />;
-  if (view && view.recipe) return <RecipeDetail recipe={view.recipe} onEdit={()=>setView({recipe:view.recipe,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} onAddToGrocery={onAddToGrocery} onRemoveFromGrocery={onRemoveFromGrocery} groceryCount={groceryCountFor ? groceryCountFor(view.recipe.id) : 0} />;
-  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
+  if (view && view.recipe) {
+    const live = recipes.find(r => r.id === view.recipe.id) || view.recipe; // reflect live status changes
+    return <RecipeDetail recipe={live} onEdit={()=>setView({recipe:live,edit:true})} onDelete={onDelete} onBack={()=>setView(null)} onSetStatus={onSetStatus} lastMade={lastMade} onAddToGrocery={onAddToGrocery} onRemoveFromGrocery={onRemoveFromGrocery} groceryCount={groceryCountFor ? groceryCountFor(live.id) : 0} />;
+  }
+  return <RecipeGrid recipes={recipes} onNew={()=>setView({recipe:newRecipe(),edit:true})} onSelect={r=>setView({recipe:r})} onImported={rec=>setView({recipe:rec,edit:true})} onSetStatus={onSetStatus} lastMade={lastMade} customTags={customTags} onAddCustomTag={onAddCustomTag} />;
 }
 
 // ─── Tag Picker ───────────────────────────────────────────────────────────────
@@ -2646,14 +2718,19 @@ function ImportModal({ onClose, onImported }) {
 }
 
 // ─── Recipe Grid ──────────────────────────────────────────────────────────────
-function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCustomTag }) {
+function RecipeGrid({ recipes, onNew, onSelect, onImported, onSetStatus, lastMade = {}, customTags, onAddCustomTag }) {
   const [showImport, setShowImport] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeFilters, setActiveFilters] = useState(new Set());
   const [openFilter, setOpenFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState("all"); // all | want | made | favorite
+  const [sortMode, setSortMode] = useState(() => localStorage.getItem("mealplanner_recipe_sort") || "newest");
+  const [sortOpen, setSortOpen] = useState(false);
+  const curMonday = weekStart();
 
+  const pickSort = (m) => { setSortMode(m); setSortOpen(false); try { localStorage.setItem("mealplanner_recipe_sort", m); } catch {} };
   const toggleFilter = (tag) => setActiveFilters(prev => { const n=new Set(prev); n.has(tag)?n.delete(tag):n.add(tag); return n; });
-  const resetAll = () => { setFilter(""); setActiveFilters(new Set()); setOpenFilter(null); };
+  const resetAll = () => { setFilter(""); setActiveFilters(new Set()); setOpenFilter(null); setStatusFilter("all"); };
 
   // Map imported cuisine/diet tags onto existing tags (case-insensitive); register
   // any genuinely new ones as custom tags so they show pre-selected in the editor.
@@ -2685,14 +2762,19 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
     { key:"cuisine", label:"Cuisine", tags:allCuisines,  activeStyle:s.typeChipCuisineActive },
   ];
 
-  const filtered = recipes.filter(r => {
-    const matchName = r.name.toLowerCase().includes(filter.toLowerCase());
-    if (activeFilters.size === 0) return matchName;
+  const q = filter.trim().toLowerCase();
+  const filtered = sortRecipes(recipes.filter(r => {
+    if (statusFilter !== "all" && (r.status || "want") !== statusFilter) return false;
+    const matchSearch = !q || r.name.toLowerCase().includes(q)
+      || (r.ingredients || []).some(i => (i.name || "").toLowerCase().includes(q));
+    if (!matchSearch) return false;
+    if (activeFilters.size === 0) return true;
     const allTags = [...r.mealTypes, ...r.dietTags, ...(r.cuisineTags||[])];
-    return matchName && [...activeFilters].every(f => allTags.includes(f));
-  });
+    return [...activeFilters].every(f => allTags.includes(f));
+  }), sortMode);
 
-  const hasAny = filter || activeFilters.size > 0;
+  const statusCounts = recipes.reduce((m, r) => { const k = r.status || "want"; m[k] = (m[k]||0)+1; return m; }, {});
+  const hasAny = filter || activeFilters.size > 0 || statusFilter !== "all";
 
   return (
     <div style={s.recipesRoot}>
@@ -2704,10 +2786,36 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
         </div>
       </div>
       <div style={s.recipeFilters}>
-        {/* Search + reset */}
+        {/* Search + sort + reset */}
         <div style={s.searchRow}>
-          <input style={{...s.recipeSearch,marginBottom:0,flex:1}} placeholder="🔍  Search recipes…" value={filter} onChange={e=>setFilter(e.target.value)} />
+          <input style={{...s.recipeSearch,marginBottom:0,flex:1}} placeholder="🔍  Search name or ingredient…" value={filter} onChange={e=>setFilter(e.target.value)} />
+          <div style={{position:"relative"}}>
+            <button style={s.listSortBtn} className="list-sort-btn" onClick={()=>setSortOpen(o=>!o)}>
+              ⇅ {RECIPE_SORTS.find(o=>o.id===sortMode)?.label || "Newest"} ▾
+            </button>
+            {sortOpen && (
+              <>
+                <div style={s.listMenuBackdrop} onClick={()=>setSortOpen(false)} />
+                <div style={{...s.listSortMenu,right:0,left:"auto"}}>
+                  {RECIPE_SORTS.map(o=>(
+                    <button key={o.id} style={{...s.listMenuItem,...(o.id===sortMode?s.listSortItemOn:{})}} className="list-menu-item"
+                      onClick={()=>pickSort(o.id)}>{o.id===sortMode?"✓ ":""}{o.label}</button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           {hasAny && <button style={s.resetBtn} onClick={resetAll}>✕ Reset</button>}
+        </div>
+
+        {/* Status chips */}
+        <div style={s.statusChipRow}>
+          <button style={{...s.statusChip,...(statusFilter==="all"?s.statusChipOn:{})}} className="status-chip" onClick={()=>setStatusFilter("all")}>All <span style={s.statusChipCount}>{recipes.length}</span></button>
+          {RECIPE_STATUSES.map(st=>(
+            <button key={st.id} style={{...s.statusChip,...(statusFilter===st.id?s.statusChipOn:{})}} className="status-chip" onClick={()=>setStatusFilter(statusFilter===st.id?"all":st.id)}>
+              {st.icon} {st.label} <span style={s.statusChipCount}>{statusCounts[st.id]||0}</span>
+            </button>
+          ))}
         </div>
 
         {/* Filter group toggles */}
@@ -2764,11 +2872,20 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
         <div style={s.recipeGrid}>
           {filtered.map(r => {
             const total = formatMinutes(parseMinutes(r.prepTime)+parseMinutes(r.cookTime));
+            const st = statusMeta(r.status || "want");
+            const lm = lastMadeLabel(lastMade[r.id], curMonday);
             return (
-              <button key={r.id} style={s.recipeCard} className="recipe-card" onClick={()=>onSelect(r)}>
-                {r.photo
-                  ? <img src={r.photo} style={s.recipeCardPhoto} alt={r.name} />
-                  : <div style={s.recipeCardPhotoPlaceholder}><span style={{fontSize:28}}>🍽</span></div>}
+              <div key={r.id} style={s.recipeCard} className="recipe-card" onClick={()=>onSelect(r)} role="button" tabIndex={0}>
+                <div style={{position:"relative"}}>
+                  {r.photo
+                    ? <img src={r.photo} style={s.recipeCardPhoto} alt={r.name} />
+                    : <div style={s.recipeCardPhotoPlaceholder}><span style={{fontSize:28}}>🍽</span></div>}
+                  <div style={{...s.recipeStatusBadge,...(r.status==="favorite"?s.recipeStatusBadgeFav:r.status==="made"?s.recipeStatusBadgeMade:{})}}
+                    className="recipe-status-badge" title="Tap to change status"
+                    onClick={(e)=>{ e.stopPropagation(); onSetStatus && onSetStatus(r.id, nextRecipeStatus(r.status||"want")); }}>
+                    {st.icon}<span style={s.recipeStatusBadgeTxt}>{st.label}</span>
+                  </div>
+                </div>
                 <div style={s.recipeCardContent}>
                   <div style={s.recipeCardName}>{r.name}</div>
                   {total && <div style={s.recipeCardTime}>⏱ {total}</div>}
@@ -2778,8 +2895,9 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
                     {(r.cuisineTags||[]).slice(0,1).map(t=><span key={t} style={{...s.tag,...s.tagCuisine}}>{t}</span>)}
                     {r.dietTags.slice(0,1).map(t=><span key={t} style={{...s.tag,...s.tagDiet}}>{t}</span>)}
                   </div>
+                  {lm && <div style={s.recipeCardLastMade}>🍴 {lm}</div>}
                 </div>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -2791,7 +2909,7 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, customTags, onAddCus
 }
 
 // ─── Recipe Detail ────────────────────────────────────────────────────────────
-function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery, onRemoveFromGrocery, groceryCount }) {
+function RecipeDetail({ recipe, onEdit, onDelete, onBack, onSetStatus, lastMade = {}, onAddToGrocery, onRemoveFromGrocery, groceryCount }) {
   const [servings, setServings] = useState(recipe.baseServings || 4);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [groceryMsg, setGroceryMsg] = useState("");
@@ -2835,6 +2953,15 @@ function RecipeDetail({ recipe, onEdit, onDelete, onBack, onAddToGrocery, onRemo
         {/* Name + meta */}
         <h1 style={s.detailTitle}>{recipe.name}</h1>
         {recipe.description && <p style={s.detailDesc}>{recipe.description}</p>}
+
+        {/* Status (Want to try / Made / Favorite) + last made */}
+        <div style={s.detailStatusRow}>
+          {RECIPE_STATUSES.map(st => (
+            <button key={st.id} style={{...s.detailStatusBtn,...((recipe.status||"want")===st.id?s.detailStatusBtnOn:{})}}
+              onClick={()=>onSetStatus && onSetStatus(recipe.id, st.id)}>{st.icon} {st.label}</button>
+          ))}
+        </div>
+        {(()=>{ const lm = lastMadeLabel(lastMade[recipe.id]); return lm ? <div style={s.detailLastMade}>🍴 {lm}</div> : null; })()}
 
         <div style={s.detailMeta}>
           {recipe.prepTime && <div style={s.detailMetaItem}><span style={s.detailMetaIcon}>⏱</span><div><div style={s.detailMetaVal}>{recipe.prepTime}</div><div style={s.detailMetaLbl}>Prep</div></div></div>}
@@ -3724,6 +3851,23 @@ const s = {
   recipeCardTime: { fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
   recipeCardDesc: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" },
   recipeCardTags: { display:"flex", gap:4, flexWrap:"wrap", alignItems:"flex-start", marginTop:"auto", paddingTop:4 },
+  recipeCardLastMade: { fontSize:10.5, color:"#7a6448", fontFamily:"'DM Sans',sans-serif", paddingTop:2 },
+
+  // Status badge on a card (tap to cycle want→made→favorite)
+  recipeStatusBadge: { position:"absolute", top:6, left:6, display:"flex", alignItems:"center", gap:3, background:"rgba(28,23,18,0.82)", border:"1px solid #5a4a30", color:"#e0c890", borderRadius:20, padding:"3px 8px", fontSize:11, fontWeight:700, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", backdropFilter:"blur(3px)", lineHeight:1 },
+  recipeStatusBadgeMade: { color:"#8ac878", borderColor:"#3a5a3a" },
+  recipeStatusBadgeFav: { color:"#f4c040", borderColor:"#6a5320" },
+  recipeStatusBadgeTxt: { fontSize:10.5 },
+  // Status chips (filter row)
+  statusChipRow: { display:"flex", gap:6, flexWrap:"wrap", marginBottom:8 },
+  statusChip: { display:"inline-flex", alignItems:"center", gap:5, background:"#241e16", border:"1px solid #3a2e22", borderRadius:20, padding:"6px 11px", fontSize:12, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, whiteSpace:"nowrap" },
+  statusChipOn: { background:"#33281b", borderColor:"#c8a878", color:"#f4c97a" },
+  statusChipCount: { fontSize:10.5, opacity:0.7 },
+  // Status picker (recipe detail)
+  detailStatusRow: { display:"flex", gap:7, flexWrap:"wrap", marginBottom:8 },
+  detailStatusBtn: { display:"inline-flex", alignItems:"center", gap:5, background:"#241e16", border:"1.5px solid #3a2e22", borderRadius:10, padding:"8px 13px", fontSize:13, color:"#b89868", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  detailStatusBtnOn: { background:"#33281b", borderColor:"#f4c97a", color:"#f4e4c4" },
+  detailLastMade: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginBottom:14 },
 
   tag: { fontSize:10, borderRadius:8, padding:"2px 7px", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
   tagMeal: { background:"#2e2c18", color:"#c8b840", border:"1px solid #4a4428" },
@@ -3977,6 +4121,8 @@ const css = `
   .list-menu-item:hover { background: #3a2e22 !important; }
   .list-reorder-btn:not(:disabled):hover { color: #f4c97a !important; }
   .list-sort-btn:hover { border-color: #c8a878 !important; }
+  .status-chip:hover { border-color: #c8a878 !important; }
+  .recipe-status-badge:hover { background: rgba(40,32,22,0.92) !important; }
   .add-grocery-btn:hover { background: #244039 !important; border-color: #3a6a60 !important; }
   .grocery-fab:hover { transform: scale(1.06); }
   .save-error-retry:hover { opacity: 0.9; }

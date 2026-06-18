@@ -7,6 +7,7 @@ import {
   mealCellEq, mealRow,
   afLayBlocks, generateSlotPlan, layoutPickerOrder,
   sortListItems,
+  sortRecipes, nextRecipeStatus, lastMadeLabel,
 } from "./App";
 
 // ─── Time parsing ──────────────────────────────────────────────────────────────
@@ -289,5 +290,55 @@ describe("sortListItems", () => {
     ];
     expect(sortListItems(noDates, "recent").map(i => i.id)).toEqual(["x", "y"]);
     expect(sortListItems(noDates, "oldest").map(i => i.id)).toEqual(["y", "x"]);
+  });
+});
+
+// ─── Recipe sorting / status / last-made ─────────────────────────────────────────
+describe("sortRecipes", () => {
+  const recipes = [
+    { id: "1", name: "Pancakes", prepTime: "10 min", created_at: "2026-01-01" },
+    { id: "2", name: "apple pie", prepTime: "45 min", created_at: "2026-03-01" },
+    { id: "3", name: "Chili",    prepTime: "",        created_at: "2026-02-01" },
+  ];
+  const ids = (mode) => sortRecipes(recipes, mode).map(r => r.id);
+  it("newest = created_at desc (default)", () => {
+    expect(ids("newest")).toEqual(["2", "3", "1"]);
+  });
+  it("a-z is case-insensitive", () => {
+    expect(ids("az")).toEqual(["2", "3", "1"]); // apple pie, Chili, Pancakes
+  });
+  it("prep sorts ascending, empty prep last", () => {
+    expect(ids("prep")).toEqual(["1", "2", "3"]); // 10, 45, (none)
+  });
+  it("does not mutate input", () => {
+    const arr = [...recipes];
+    sortRecipes(arr, "az");
+    expect(arr.map(r => r.id)).toEqual(["1", "2", "3"]);
+  });
+});
+
+describe("nextRecipeStatus", () => {
+  it("cycles want → made → favorite → want", () => {
+    expect(nextRecipeStatus("want")).toBe("made");
+    expect(nextRecipeStatus("made")).toBe("favorite");
+    expect(nextRecipeStatus("favorite")).toBe("want");
+  });
+  it("treats unknown/missing as the start of the cycle", () => {
+    expect(nextRecipeStatus(undefined)).toBe("want");
+  });
+});
+
+describe("lastMadeLabel", () => {
+  const monday = "2026-06-15";
+  it("returns null when never planned", () => {
+    expect(lastMadeLabel(null, monday)).toBeNull();
+  });
+  it("uses relative weeks for recent plans", () => {
+    expect(lastMadeLabel("2026-06-15", monday)).toBe("Made this week");
+    expect(lastMadeLabel("2026-06-08", monday)).toBe("Made last week");
+    expect(lastMadeLabel("2026-05-25", monday)).toBe("Made 3 weeks ago");
+  });
+  it("falls back to month/year for older plans", () => {
+    expect(lastMadeLabel("2026-01-05", monday)).toMatch(/^Last made /);
   });
 });
