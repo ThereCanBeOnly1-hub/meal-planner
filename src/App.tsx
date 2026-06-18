@@ -526,6 +526,16 @@ const sb = {
     const r = await this._req(`${SUPABASE_URL}/rest/v1/${table}?${query}`, { method: "DELETE" });
     if (!r.ok) throw new Error(await r.text());
   },
+  // Partial UPDATE of matching rows — for changing a few columns without
+  // re-sending the whole row (an upsert would fail NOT NULL on omitted columns).
+  async patch(table, query, data) {
+    const r = await this._req(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+      method: "PATCH",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(data),
+    });
+    if (!r.ok) throw new Error(await r.text());
+  },
 };
 
 // ─── Auth (email + password; login only, no in-app sign-up) ───────────────────
@@ -1142,7 +1152,7 @@ export default function App() {
   // don't re-send the recipe's base64 photo on every quick toggle.
   const setRecipeStatus = (id, status) => {
     setRecipes(prev => prev.map(r => r.id === id ? { ...r, status } : r));
-    dbWrite("Couldn't update the recipe status", () => sb.upsert("recipes", [{ id, status, updated_at: new Date().toISOString() }]));
+    dbWrite("Couldn't update the recipe status", () => sb.patch("recipes", `id=eq.${id}`, { status, updated_at: new Date().toISOString() }));
   };
 
   // When the Recipes tab is open, pull a tiny recipe_id/week_start projection of
