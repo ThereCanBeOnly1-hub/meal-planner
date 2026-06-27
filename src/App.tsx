@@ -499,11 +499,14 @@ const sb = {
     "Content-Type": "application/json",
   }),
   // On 401/403, try one token refresh and retry; if that fails, trigger sign-out.
+  // Each request times out (AbortSignal) so a hung connection on flaky mobile
+  // data can't leave loadAll's in-flight guard stuck forever.
   async _req(url, opts = {}) {
-    let r = await fetch(url, { ...opts, headers: { ...this.h(), ...(opts.headers || {}) } });
+    const send = () => fetch(url, { ...opts, signal: opts.signal || AbortSignal.timeout(20000), headers: { ...this.h(), ...(opts.headers || {}) } });
+    let r = await send();
     if (r.status === 401 || r.status === 403) {
       const t = await _refreshHook();
-      if (t) r = await fetch(url, { ...opts, headers: { ...this.h(), ...(opts.headers || {}) } });
+      if (t) r = await send();
       else _onAuthError();
     }
     return r;
@@ -759,6 +762,7 @@ export default function App() {
   const [location, setLocation] = useState(() => { try { const s = localStorage.getItem("mealplanner_loc"); return s ? JSON.parse(s) : null; } catch { return null; } });
   const [weatherData, setWeatherData] = useState({});
   const isLoadingRef = useRef(false);
+  const pendingReloadRef = useRef(false); // a loadAll asked to run while one was in flight — don't drop it
   const hasLoadedRef = useRef(false);
   const recipesLoadedRef = useRef(false);
   const pendingMealsRef = useRef(new Map()); // `ws::day::slot` -> entry of in-flight meal writes
@@ -970,7 +974,10 @@ export default function App() {
   };
 
   const loadAll = async (opts = {}) => {
-    if (isLoadingRef.current || (isConfigured && !sessionRef.current)) return;
+    if (isConfigured && !sessionRef.current) return;
+    // Another load is in flight: don't drop this request — queue a re-run so a
+    // navigation/poll that fires mid-load still converges on the viewed week.
+    if (isLoadingRef.current) { pendingReloadRef.current = true; return; }
     // Fetch recipes on the first load and when explicitly requested; polls skip
     // them (rarely change, heavy base64 photos).
     const wantRecipes = opts.recipes !== false || !recipesLoadedRef.current;
@@ -1073,6 +1080,11 @@ export default function App() {
       // Skip all setState when nothing changed since the last load (avoids a
       // full re-render on every poll). Recipes fall back to the current ref when
       // not fetched, so skipping their fetch doesn't register as a change.
+      // The viewed week changed while we were fetching: this payload is for a
+      // stale week. Don't apply it (would show the wrong/old week and stamp the
+      // sig so the correct reload gets skipped) — queue a fresh load instead.
+      if (viewedWeekStartRef.current !== ws) { pendingReloadRef.current = true; return; }
+
       const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, sortsVal, mappedRecipes ?? recipesRef.current]);
       if (sig === lastPayloadSigRef.current) { hasLoadedRef.current = true; setSyncStatus("synced"); return; }
       lastPayloadSigRef.current = sig;
@@ -1098,6 +1110,12 @@ export default function App() {
       setSyncStatus("error");
     } finally {
       isLoadingRef.current = false;
+      // A load was requested while this one ran (or the viewed week moved):
+      // run once more so we converge instead of leaving a blank/stale week.
+      if (pendingReloadRef.current || viewedWeekStartRef.current !== ws) {
+        pendingReloadRef.current = false;
+        setTimeout(() => loadAll({ recipes: false, silent: true }), 0);
+      }
     }
   };
 
