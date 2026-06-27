@@ -8,7 +8,19 @@ import {
   afLayBlocks, generateSlotPlan, layoutPickerOrder,
   sortListItems,
   sortRecipes, nextRecipeStatus, lastMadeLabel,
+  weekStart,
 } from "./App";
+
+// ─── Week start key (timezone stability) ─────────────────────────────────────────
+describe("weekStart", () => {
+  it("always returns a Monday, regardless of the local time of day", () => {
+    // The bug was an evening UTC roll-over making this a Tuesday in negative
+    // offsets. Whatever the clock, the key must be the local Monday.
+    const ws = weekStart();
+    expect(ws).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(new Date(ws + "T00:00:00").getDay()).toBe(1); // 1 = Monday
+  });
+});
 
 // ─── Time parsing ──────────────────────────────────────────────────────────────
 describe("parseMinutes / formatMinutes", () => {

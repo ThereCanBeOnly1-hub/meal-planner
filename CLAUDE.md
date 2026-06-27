@@ -130,6 +130,6 @@
 - Tag chips use `className` + CSS for hover; selected state uses `day-chip-sel` class to override hover
 - Photos stored as base64 data URLs (resized client-side) or http URLs in `recipe.photo` field
 - Time strings parsed by `parseMinutes()` which handles "30 min", "1 hr", "1h 30m" etc.
-- Week starts on Monday; `weekStart()` returns YYYY-MM-DD of current Monday
+- Week starts on Monday; `weekStart()` returns YYYY-MM-DD of current Monday. **Build week-start strings from LOCAL date parts, never `toISOString()` on a value carrying the current time-of-day** — in a negative-UTC-offset timezone an evening call would roll the date forward (Mon→Tue) and drift the `week_start` query key off the saved rows (current week showed blank in the evening on all devices at once). `addWeeks`/`getWeeksInMonth` already start from local midnight, so they were stable; `weekStart()` was the outlier. Invariant: `new Date(weekStart()+"T00:00:00").getDay() === 1`.
 - `addWeeks(ws, n)` shifts a week-start string by n weeks
 - `getWeeksInMonth(year, month)` returns array of Monday strings for that month

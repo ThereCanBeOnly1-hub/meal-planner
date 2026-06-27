@@ -571,8 +571,13 @@ const authSignOut = (access_token) => {
 
 const weekStart = () => {
   const now = new Date(); const dow = now.getDay();
-  const mon = new Date(now); mon.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1));
-  return mon.toISOString().split("T")[0];
+  // Build the Monday from LOCAL date parts — never toISOString() on a value that
+  // carries the current time-of-day, or in a negative-UTC-offset timezone an
+  // evening call rolls the date forward a day (Mon→Tue) and the week_start key
+  // drifts off the saved rows (current week shows blank in the evening).
+  const mon = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (dow === 0 ? 6 : dow - 1));
+  const y = mon.getFullYear(), m = String(mon.getMonth() + 1).padStart(2, "0"), d = String(mon.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 };
 
 // List sort options. "manual" = the user's custom order (by position, which the
