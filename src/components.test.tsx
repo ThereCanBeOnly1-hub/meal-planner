@@ -120,26 +120,37 @@ describe("ListDetail", () => {
     expect(onAddItem).toHaveBeenCalledWith("L1", "sock");
   });
 
-  it("shows reorder arrows in custom order and moves an item", () => {
-    const onMoveItem = vi.fn();
+  // Note: the actual drag-reorder math (which row you're hovering over) depends
+  // on getBoundingClientRect(), which jsdom always returns as all-zero (no real
+  // layout) — so it can't be meaningfully exercised here. These just cover the
+  // testable contract: the handle appears/disappears with sortMode, and starting
+  // a drag doesn't throw even where pointer capture isn't supported (jsdom).
+  it("shows a drag handle per row in custom order", () => {
     const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [
       { id: "a", text: "Apple", checked: false, position: 0, measures: [], sources: [] },
       { id: "b", text: "Banana", checked: false, position: 1, measures: [], sources: [] },
     ] };
-    const { container } = renderDetail(list, { sortMode: "manual", onMoveItem });
-    const downs = container.querySelectorAll(".list-reorder-btn");
-    expect(downs.length).toBe(4); // up+down per row
-    fireEvent.click(container.querySelector(".list-reorder-btn:not([disabled])")); // first enabled = item a "down"
-    expect(onMoveItem).toHaveBeenCalledWith("L1", "a", 1, ["a", "b"]);
+    const { container } = renderDetail(list, { sortMode: "manual", onMoveItem: vi.fn() });
+    expect(container.querySelectorAll(".list-drag-handle").length).toBe(2);
   });
 
-  it("hides reorder arrows when not in custom order", () => {
+  it("hides the drag handle when not in custom order", () => {
     const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [
       { id: "a", text: "Apple", checked: false, position: 0, measures: [], sources: [] },
       { id: "b", text: "Banana", checked: false, position: 1, measures: [], sources: [] },
     ] };
     const { container } = renderDetail(list, { sortMode: "az", onMoveItem: vi.fn() });
-    expect(container.querySelectorAll(".list-reorder-btn").length).toBe(0);
+    expect(container.querySelectorAll(".list-drag-handle").length).toBe(0);
+  });
+
+  it("starting a drag on the handle does not throw", () => {
+    const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳", items: [
+      { id: "a", text: "Apple", checked: false, position: 0, measures: [], sources: [] },
+      { id: "b", text: "Banana", checked: false, position: 1, measures: [], sources: [] },
+    ] };
+    const { container } = renderDetail(list, { sortMode: "manual", onMoveItem: vi.fn() });
+    const handle = container.querySelectorAll(".list-drag-handle")[0];
+    expect(() => fireEvent.pointerDown(handle, { clientY: 10, pointerId: 1 })).not.toThrow();
   });
 
   it("delete-by-recipe removes only the selected recipe's ingredients", () => {

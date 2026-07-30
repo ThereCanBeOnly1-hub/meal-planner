@@ -1284,16 +1284,17 @@ export default function App() {
     trackPending(itemId, { kind: "item", listId, deleted: true });
     syncWrite("Couldn't delete the item", () => sb.del("list_items", `id=eq.${itemId}`), [itemId]);
   };
-  // Custom (manual) reorder via ▲/▼. Renumbers the moved item's display group
-  // (siblingIds, in current order) to 0..n so positions stay clean & distinct;
-  // grouping is by source type, so within-group positions can safely overlap
-  // other groups. Only the rows whose position actually changed are written.
-  const moveListItem = (listId, itemId, dir, siblingIds) => {
-    const idx = siblingIds.indexOf(itemId);
-    const j = idx + dir;
-    if (idx < 0 || j < 0 || j >= siblingIds.length) return;
+  // Custom (manual) reorder via drag handle. Moves an item to an arbitrary
+  // index within its display group (siblingIds, in current order) and
+  // renumbers that group to 0..n so positions stay clean & distinct; grouping
+  // is by source type, so within-group positions can safely overlap other
+  // groups. Only the rows whose position actually changed are written.
+  const reorderListItem = (listId, itemId, toIndex, siblingIds) => {
+    const fromIndex = siblingIds.indexOf(itemId);
+    if (fromIndex < 0 || toIndex < 0 || toIndex >= siblingIds.length || fromIndex === toIndex) return;
     const order = [...siblingIds];
-    [order[idx], order[j]] = [order[j], order[idx]];
+    order.splice(fromIndex, 1);
+    order.splice(toIndex, 0, itemId);
     const posOf = new Map(order.map((id, i) => [id, i]));
     const list = lists.find(l => l.id === listId); if (!list) return;
     const rows = [], ids = [];
@@ -1555,7 +1556,7 @@ export default function App() {
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
             onSetItemQty={setItemQty} onSetItemText={setItemText} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping}
-            listSorts={listSorts} onSetSort={setListSort} onMoveItem={moveListItem}
+            listSorts={listSorts} onSetSort={setListSort} onMoveItem={reorderListItem}
             userEmail={session?.user?.email} onSignOut={signOut} />
         )}
       </div>
@@ -3293,7 +3294,8 @@ const computeDupKeys = (items) => {
 
 const abbrev = (str, n) => (str && str.length > n ? str.slice(0, n - 1) + "…" : str || "");
 
-function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetText, qtyEditable, showArrows, isFirst, isLast, onMoveUp, onMoveDown }) {
+function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetText, qtyEditable,
+  dragHandle, rowRef, isDragging, dragOffsetY, onDragStart, onDragMove, onDragEnd, onDragCancel }) {
   const [showSrc, setShowSrc] = useState(false);
   const [editingQty, setEditingQty] = useState(false);
   const [qtyInput, setQtyInput] = useState("");
@@ -3312,7 +3314,7 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetT
   const startEditText = () => { setTextInput(item.text); setEditingText(true); };
   const saveText = () => { onSetText && onSetText(listId, item.id, textInput); setEditingText(false); };
   return (
-    <div style={s.listItemRow}>
+    <div ref={rowRef} style={{...s.listItemRow, ...(isDragging ? {...s.listItemRowDragging, transform:`translateY(${dragOffsetY}px)`} : {})}}>
       <button style={{...s.listCheck,...(item.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggle(listId, item.id)}>{item.checked ? "✓" : ""}</button>
       <div style={{flex:1, minWidth:0}}>
         <div style={{...s.listItemText,...(item.checked?s.listItemTextChecked:{})}}>
@@ -3353,11 +3355,9 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetT
         )}
       </div>
       {hasSrc && <button style={s.listSrcIcon} className="list-src-icon" onClick={() => setShowSrc(v => !v)} title={sources.map(s => s.name).join(", ")}>🍽</button>}
-      {showArrows && (
-        <div style={s.listReorder}>
-          <button style={{...s.listReorderBtn,...(isFirst?s.listReorderBtnDim:{})}} className="list-reorder-btn" disabled={isFirst} onClick={onMoveUp} title="Move up">▲</button>
-          <button style={{...s.listReorderBtn,...(isLast?s.listReorderBtnDim:{})}} className="list-reorder-btn" disabled={isLast} onClick={onMoveDown} title="Move down">▼</button>
-        </div>
+      {dragHandle && (
+        <button style={s.listDragHandle} className="list-drag-handle" title="Drag to reorder"
+          onPointerDown={onDragStart} onPointerMove={onDragMove} onPointerUp={onDragEnd} onPointerCancel={onDragCancel}>⠿</button>
       )}
       <button style={s.listItemDel} className="list-item-del" onClick={() => onDelete(listId, item.id)}>✕</button>
     </div>
@@ -3370,18 +3370,68 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, onSetText,
   const dupKeys = computeDupKeys(items);
   const q = (filter || "").trim().toLowerCase();
   const matches = (it) => !q || (it.text || "").toLowerCase().includes(q);
-  // Arrows only make sense in custom order, with no search filter narrowing the view.
-  const arrowsOn = sortMode === "manual" && !q && !!onMove;
+  // Drag-to-reorder only makes sense in custom order, with no search filter narrowing the view.
+  const dragOn = sortMode === "manual" && !q && !!onMove;
 
-  // `group` (when given) is the ordered array the item lives in — used so the
-  // ▲/▼ arrows know their bounds and can renumber that group on move.
+  // Drag-and-drop reorder via a dedicated handle (Pointer Events, so the same
+  // code path covers mouse + touch + pen). `rowRefs` measures each row's
+  // on-screen rect ONCE at drag start; `dragRef` is a mutable session object
+  // (not state) so pointermove doesn't re-render the whole list every frame —
+  // only `dragging` (the floating-row offset) is state, since it drives the
+  // visible drag. The handle's `touch-action: none` (see listDragHandle style)
+  // is what stops the browser's own scroll gesture from stealing the touch —
+  // scoped to just the handle, so the rest of the row/page still scrolls normally.
+  const rowRefs = useRef(new Map()); // itemId -> row DOM node
+  const dragRef = useRef(null);      // { ids, itemId, startIndex, targetIndex, startY, rects }
+  const [dragging, setDragging] = useState(null); // { id, offsetY } | null
+  const setRowRef = (id) => (el) => { el ? rowRefs.current.set(id, el) : rowRefs.current.delete(id); };
+
+  const endDrag = (commit) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    setDragging(null);
+    if (commit && d && d.targetIndex !== d.startIndex) onMove(listId, d.itemId, d.targetIndex, d.ids);
+  };
+  const onDragPointerDown = (e, ids, itemId) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return; // left-click only for mouse
+    const idx = ids.indexOf(itemId);
+    const rects = ids.map(id => rowRefs.current.get(id)?.getBoundingClientRect());
+    if (idx < 0 || rects.some(r => !r)) return;
+    dragRef.current = { ids, itemId, startIndex: idx, targetIndex: idx, startY: e.clientY, rects };
+    setDragging({ id: itemId, offsetY: 0 });
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+  };
+  const onDragPointerMove = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    e.preventDefault();
+    const offsetY = e.clientY - d.startY;
+    const draggedRect = d.rects[d.startIndex];
+    const draggedCenter = draggedRect.top + draggedRect.height / 2 + offsetY;
+    // Target slot = how many OTHER rows' original centers the dragged row's
+    // current center has passed — a standard reorder-by-pointer formula that
+    // only needs each row's rect measured once (no per-frame re-layout).
+    let targetIndex = 0;
+    d.rects.forEach((r, i) => { if (i !== d.startIndex && r.top + r.height / 2 < draggedCenter) targetIndex++; });
+    d.targetIndex = targetIndex;
+    setDragging({ id: d.itemId, offsetY });
+  };
+  const onDragPointerUp = () => endDrag(true);
+  const onDragPointerCancel = () => endDrag(false);
+
+  // `group` (when given) is the ordered array the item lives in — used so drag
+  // knows its bounds and can renumber that group on drop.
   const row = (it, group) => {
     const ids = group ? group.map(x => x.id) : null;
-    const idx = ids ? ids.indexOf(it.id) : -1;
+    const dragHandle = dragOn && !!group;
+    const isDragging = dragging?.id === it.id;
     return <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))}
       onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} onSetText={onSetText} qtyEditable={qtyEditable}
-      showArrows={arrowsOn && !!group} isFirst={idx === 0} isLast={idx === (ids ? ids.length - 1 : 0)}
-      onMoveUp={() => onMove(listId, it.id, -1, ids)} onMoveDown={() => onMove(listId, it.id, +1, ids)} />;
+      dragHandle={dragHandle} rowRef={dragHandle ? setRowRef(it.id) : undefined}
+      isDragging={isDragging} dragOffsetY={isDragging ? dragging.offsetY : 0}
+      onDragStart={dragHandle ? (e) => onDragPointerDown(e, ids, it.id) : undefined}
+      onDragMove={onDragPointerMove} onDragEnd={onDragPointerUp} onDragCancel={onDragPointerCancel} />;
   };
 
   // Search view: one flat matching list (incl. checked), so it's easy to see if
@@ -3611,7 +3661,7 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
                 </>
               )}
             </div>
-            {sortMode === "manual" && !input && <span style={s.listSortHint}>Use ▲▼ to arrange</span>}
+            {sortMode === "manual" && !input && <span style={s.listSortHint}>Drag ⠿ to arrange</span>}
           </div>
         )}
 
@@ -4061,6 +4111,7 @@ const s = {
   listAddRow: { display:"flex", gap:8, alignItems:"center", marginBottom:16 },
   listItems: { display:"flex", flexDirection:"column", gap:2 },
   listItemRow: { display:"flex", alignItems:"center", gap:11, padding:"10px 2px", borderBottom:"1px solid #221b13" },
+  listItemRowDragging: { position:"relative", zIndex:5, background:"#241e16", borderRadius:8, boxShadow:"0 10px 24px rgba(0,0,0,0.45)" },
   listCheck: { width:24, height:24, borderRadius:7, border:"1.5px solid #4a3c2a", background:"#1c1712", color:"#1c1712", fontSize:14, fontWeight:800, cursor:"pointer", flexShrink:0, display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
   listCheckOn: { background:"#8ac878", borderColor:"#8ac878", color:"#1c1712" },
   listItemText: { fontSize:15, color:"#f0e0c0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.35, wordBreak:"break-word" },
@@ -4093,9 +4144,10 @@ const s = {
   listMenuItem: { background:"none", border:"none", textAlign:"left", padding:"9px 11px", borderRadius:7, fontSize:13.5, color:"#e8dcc4", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
 
   // Reorder arrows (custom order)
-  listReorder: { display:"flex", flexDirection:"column", flexShrink:0, marginLeft:2 },
-  listReorderBtn: { background:"none", border:"none", color:"#9a7f60", fontSize:9, lineHeight:1, cursor:"pointer", padding:"2px 4px" },
-  listReorderBtnDim: { color:"#3a2e22", cursor:"default" },
+  // touchAction:"none" is what stops the browser's own touch-scroll from
+  // stealing the drag gesture — scoped to just this handle so the rest of the
+  // row (and the page) keeps scrolling normally everywhere else.
+  listDragHandle: { background:"none", border:"none", color:"#9a7f60", fontSize:17, lineHeight:1, cursor:"grab", padding:"4px 6px", flexShrink:0, touchAction:"none", userSelect:"none" },
   // Search clear ✕ inside the add box
   listSearchClear: { position:"absolute", right:6, background:"none", border:"none", color:"#7a6448", fontSize:12, cursor:"pointer", padding:"4px 5px", lineHeight:1 },
   listSearchEmpty: { fontSize:13, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", textAlign:"center", padding:"20px 12px", lineHeight:1.5 },
@@ -4202,7 +4254,8 @@ const css = `
   .layout-move:hover { background: #3a2e22 !important; color: #f4c97a !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
-  .list-reorder-btn:not(:disabled):hover { color: #f4c97a !important; }
+  .list-drag-handle:hover { color: #f4c97a !important; }
+  .list-drag-handle:active { cursor: grabbing; }
   .list-sort-btn:hover { border-color: #c8a878 !important; }
   .status-chip:hover { border-color: #c8a878 !important; }
   .recipe-status-badge:hover { background: rgba(40,32,22,0.92) !important; }
