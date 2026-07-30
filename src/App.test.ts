@@ -3,7 +3,7 @@ import {
   parseMinutes, formatMinutes,
   parseQty, formatQty, scaleAmount,
   normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput, parseItemQty, sumSourceMeasures,
-  normalizeImported, addWeeks,
+  normalizeImported, addWeeks, toLocalYMD,
   mealCellEq, mealRow,
   afLayBlocks, generateSlotPlan, layoutPickerOrder,
   sortListItems,
@@ -211,10 +211,22 @@ describe("normalizeImported", () => {
 });
 
 // ─── Dates ──────────────────────────────────────────────────────────────────────
+describe("toLocalYMD", () => {
+  it("formats from LOCAL date parts, whatever the time of day", () => {
+    // toISOString() would roll this to the next/previous day in non-UTC zones.
+    expect(toLocalYMD(new Date(2026, 5, 1, 23, 30))).toBe("2026-06-01");
+    expect(toLocalYMD(new Date(2026, 0, 5, 0, 0))).toBe("2026-01-05");
+  });
+});
+
 describe("addWeeks", () => {
   it("shifts a week-start string by n weeks", () => {
     expect(addWeeks("2026-06-01", 1)).toBe("2026-06-08");
     expect(addWeeks("2026-06-08", -1)).toBe("2026-06-01");
+  });
+  it("keeps the result a Monday (same invariant as weekStart)", () => {
+    expect(new Date(addWeeks("2026-06-01", 1) + "T00:00:00").getDay()).toBe(1);
+    expect(new Date(addWeeks("2026-06-01", -1) + "T00:00:00").getDay()).toBe(1);
   });
 });
 

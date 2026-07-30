@@ -155,6 +155,27 @@ describe("ListDetail", () => {
     fireEvent.click(screen.getByText(/Remove 1/));                // confirm
     expect(onRemoveRecipes).toHaveBeenCalledWith(["r1"]);
   });
+
+  it("renames a manual item's text (no sources)", () => {
+    const onSetItemText = vi.fn();
+    const list = { id: "L1", name: "Packing", type: "custom", icon: "🧳",
+      items: [{ id: "it1", text: "Socks", checked: false, measures: [], sources: [] }] };
+    const { container } = renderDetail(list, { onSetItemText });
+    fireEvent.click(container.querySelector(".list-text-btn"));
+    const input = screen.getByPlaceholderText("Item name");
+    fireEvent.change(input, { target: { value: "Wool socks" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSetItemText).toHaveBeenCalledWith("L1", "it1", "Wool socks");
+  });
+
+  it("does not offer rename for recipe-sourced grocery items", () => {
+    const onSetItemText = vi.fn();
+    const grocery = { id: "grocery", name: "Grocery", type: "grocery", icon: "🛒",
+      items: [{ id: "a", text: "Onion", checked: false, measures: [], sources: [{ id: "r1", name: "Tacos" }] }] };
+    const { container } = renderDetail(grocery, { onSetItemText });
+    expect(container.querySelector(".list-text-btn")).toBeNull(); // no rename affordance
+    expect(container.textContent).toContain("Onion");             // name still shown
+  });
 });
 
 // ─── ListItemsList grouping (manual vs recipe-sourced) ──────────────────────────

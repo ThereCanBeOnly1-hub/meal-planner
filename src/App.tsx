@@ -28,9 +28,13 @@ const mealRow = (ws, day, slot, e) => ({
 });
 const mealCellEq = (a, b) => !!a && !!b && a.meal === b.meal && !!a.thaw === !!b.thaw && (a.thawDays || 2) === (b.thawDays || 2) && (a.recipeId || null) === (b.recipeId || null);
 
+// Local-date → "YYYY-MM-DD". Never use toISOString() for this: it converts to
+// UTC first, so in a non-UTC timezone the date can roll a day (the weekStart bug).
+const toLocalYMD = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
 const addWeeks = (ws, n) => {
   const d = new Date(ws + "T00:00:00"); d.setDate(d.getDate() + n * 7);
-  return d.toISOString().split("T")[0];
+  return toLocalYMD(d);
 };
 
 const getWeekRange = (ws) => {
@@ -55,7 +59,7 @@ const getWeeksInMonth = (year, month) => {
   const mon = new Date(firstDay); mon.setDate(firstDay.getDate() - (dow === 0 ? 6 : dow - 1));
   const weeks = [];
   while (mon <= lastDay) {
-    weeks.push(mon.toISOString().split("T")[0]);
+    weeks.push(toLocalYMD(mon));
     mon.setDate(mon.getDate() + 7);
   }
   return weeks;
@@ -67,10 +71,15 @@ const getTodayName = () => ["Sunday","Monday","Tuesday","Wednesday","Thursday","
 const loadCustomTags = (key) => { try { return JSON.parse(localStorage.getItem(`mealplanner_custom_${key}`) || "[]"); } catch { return []; } };
 const saveCustomTags = (key, tags) => localStorage.setItem(`mealplanner_custom_${key}`, JSON.stringify(tags));
 
-const resizeImage = (file, maxW = 600) => new Promise(resolve => {
+// Rejects on unreadable/corrupt files — without the onerror handlers a bad file
+// leaves the promise pending forever (photo import would spin indefinitely).
+const resizeImage = (file, maxW = 600) => new Promise((resolve, reject) => {
+  const fail = () => reject(new Error("Couldn't read that image. Try a different photo."));
   const reader = new FileReader();
+  reader.onerror = fail;
   reader.onload = e => {
     const img = new Image();
+    img.onerror = fail;
     img.onload = () => {
       const scale = Math.min(1, maxW / img.width);
       const canvas = document.createElement("canvas");
@@ -571,13 +580,11 @@ const authSignOut = (access_token) => {
 
 const weekStart = () => {
   const now = new Date(); const dow = now.getDay();
-  // Build the Monday from LOCAL date parts — never toISOString() on a value that
-  // carries the current time-of-day, or in a negative-UTC-offset timezone an
-  // evening call rolls the date forward a day (Mon→Tue) and the week_start key
-  // drifts off the saved rows (current week shows blank in the evening).
+  // Build the Monday from LOCAL date parts (toLocalYMD) — toISOString() here once
+  // rolled the date forward on evening calls in negative-UTC-offset timezones,
+  // drifting the week_start key off the saved rows (current week showed blank).
   const mon = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (dow === 0 ? 6 : dow - 1));
-  const y = mon.getFullYear(), m = String(mon.getMonth() + 1).padStart(2, "0"), d = String(mon.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
+  return toLocalYMD(mon);
 };
 
 // List sort options. "manual" = the user's custom order (by position, which the
@@ -652,7 +659,7 @@ export {
   normalizeImported, recipeToRow,
   normIngredient, groceryKey, unitKey, unitDisplay, ingredientToMeasure, mergeMeasures, formatMeasures, parseQtyInput, parseItemQty, sumSourceMeasures,
   afSample, afLayBlocks, afPlanKey, generateSlotPlan, generateWeekPlan,
-  layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart,
+  layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart, toLocalYMD,
   mealRow, mealCellEq, sortListItems,
   sortRecipes, nextRecipeStatus, lastMadeLabel,
 };
@@ -776,9 +783,11 @@ export default function App() {
   const extrasDirtyRef = useRef({ ws: null, ts: 0 }); // recent local extras edit, to guard against poll clobber
   const pendingMealLinkRef = useRef(null); // {ws,day,slot,recipeId} when creating a recipe from a planner meal
   const lastPayloadSigRef = useRef(""); // signature of last applied load, to skip no-op re-renders
+  const lastRecipesSigRef = useRef(""); // recipes' part of the sig, cached so polls (which skip the recipe fetch) don't re-stringify base64 photos
   const syncExtrasLockRef = useRef(false);
+  const pendingExtrasRef = useRef(null); // extras snapshot queued while a sync is in flight (so a mid-flight edit isn't dropped)
+  const lastUserIdRef = useRef(null);    // detects an account change vs a mere week change
   const lastVisibilityLoadRef = useRef(0);
-  const mealTimer = useRef(null);
   const extrasTimer = useRef(null);
   const recipesRef = useRef(recipes);
   const isRestoringRef = useRef(false);
@@ -859,14 +868,20 @@ export default function App() {
   useEffect(() => {
     if (!isConfigured || !session) return;
     hasLoadedRef.current = false;
-    recipesLoadedRef.current = false;      // refetch recipes on (re)login
     lastPayloadSigRef.current = "";        // force loadAll to apply the new week's data
     setWeek(initialWeek());
     setNextWeekMeals(initialWeek());
     setPrevWeekMeals(initialWeek());
-    setLists([]);
     setSnacks([]);
     setDesserts([]);
+    // Lists and recipes aren't week-scoped — only reset them when the signed-in
+    // account changed, not on week navigation (which used to flash the Lists
+    // tab/grocery badge empty and refetch every base64 recipe photo).
+    if (lastUserIdRef.current !== session.user?.id) {
+      lastUserIdRef.current = session.user?.id;
+      recipesLoadedRef.current = false;    // refetch recipes on (re)login
+      setLists([]);
+    }
     loadAll();
   }, [viewedWeekStart, session?.user?.id]);
 
@@ -887,7 +902,7 @@ export default function App() {
     const wkEnd = new Date(viewedWeekStart + "T00:00:00"); wkEnd.setDate(wkEnd.getDate()+6);
     const maxDate = new Date(today); maxDate.setDate(today.getDate()+15);
     if (wkEnd < today || new Date(viewedWeekStart + "T00:00:00") > maxDate) { setWeatherData({}); return; }
-    const endDate = wkEnd > maxDate ? maxDate.toISOString().split("T")[0] : wkEnd.toISOString().split("T")[0];
+    const endDate = toLocalYMD(wkEnd > maxDate ? maxDate : wkEnd);
     fetchWeather(location.lat, location.lon, viewedWeekStart, endDate)
       .then(setWeatherData).catch(() => setWeatherData({}));
   }, [location, viewedWeekStart]);
@@ -1090,7 +1105,11 @@ export default function App() {
       // sig so the correct reload gets skipped) — queue a fresh load instead.
       if (viewedWeekStartRef.current !== ws) { pendingReloadRef.current = true; return; }
 
-      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, sortsVal, mappedRecipes ?? recipesRef.current]);
+      // Recipes' sig is cached from the last actual fetch — polls skip the recipe
+      // fetch, so re-stringifying them (MBs of base64 photos) every 10s is waste.
+      const recipesSig = mappedRecipes ? JSON.stringify(mappedRecipes) : lastRecipesSigRef.current;
+      if (mappedRecipes) lastRecipesSigRef.current = recipesSig;
+      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, sortsVal]) + "|" + recipesSig;
       if (sig === lastPayloadSigRef.current) { hasLoadedRef.current = true; setSyncStatus("synced"); return; }
       lastPayloadSigRef.current = sig;
 
@@ -1124,8 +1143,11 @@ export default function App() {
     }
   };
 
-  const syncExtras = async (snackList, dessertList) => {
-    if (syncExtrasLockRef.current) return;
+  const syncExtras = (snackList, dessertList) => {
+    // A sync is already in flight: queue this snapshot instead of dropping it
+    // (a plain early-return silently lost any edit made mid-flight — the write
+    // never happened and the next poll reverted the UI).
+    if (syncExtrasLockRef.current) { pendingExtrasRef.current = [snackList, dessertList]; return; }
     syncExtrasLockRef.current = true;
     const ws = viewedWeekStartRef.current;
     const run = async () => {
@@ -1136,7 +1158,11 @@ export default function App() {
       ];
       if (rows.length > 0) await sb.upsert("extras", rows);
     };
-    dbWrite("Couldn't save snacks/desserts", run).finally(() => { syncExtrasLockRef.current = false; });
+    dbWrite("Couldn't save snacks/desserts", run).finally(() => {
+      syncExtrasLockRef.current = false;
+      const queued = pendingExtrasRef.current;
+      if (queued) { pendingExtrasRef.current = null; syncExtras(queued[0], queued[1]); }
+    });
   };
 
   // Create a new recipe pre-filled from a planner meal; remember which cell to
@@ -1410,6 +1436,19 @@ export default function App() {
     trackPending(itemId, { kind: "item", listId, item: updated });
     syncWrite("Couldn't save the quantity", () => sb.upsert("list_items", [listItemToRow(updated, listId)], "id"), [itemId]);
   };
+  // Rename an item's text. Blocked for recipe-sourced grocery items (renaming
+  // would desync the item from the ingredient it represents) — ListItemRow only
+  // offers this for items with no `sources`, which is every item on every
+  // non-grocery list plus the grocery list's own "Added by you" items.
+  const setItemText = (listId, itemId, text) => {
+    const t = text.trim(); if (!t) return;
+    const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
+    if ((it.sources || []).length > 0 || t === it.text) return;
+    const updated = { ...it, text: t };
+    setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(x => x.id === itemId ? updated : x) }));
+    trackPending(itemId, { kind: "item", listId, item: updated });
+    syncWrite("Couldn't rename the item", () => sb.upsert("list_items", [listItemToRow(updated, listId)], "id"), [itemId]);
+  };
 
   // ─── Categorization (Shopping Mode) ──────────────────────────────────────────
   // Merge with the latest server cache before writing so two devices
@@ -1515,7 +1554,7 @@ export default function App() {
             onOpen={(id) => navigate("lists", id ? { listId: id } : null)}
             onAddList={addList} onUpdateList={updateList} onDeleteList={deleteList}
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
-            onSetItemQty={setItemQty} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping}
+            onSetItemQty={setItemQty} onSetItemText={setItemText} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping}
             listSorts={listSorts} onSetSort={setListSort} onMoveItem={moveListItem}
             userEmail={session?.user?.email} onSignOut={signOut} />
         )}
@@ -1552,7 +1591,7 @@ export default function App() {
         <GroceryDrawer
           list={lists.find(l => l.type === "grocery")}
           onClose={closeGrocery}
-          onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems} onSetItemQty={setItemQty}
+          onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems} onSetItemQty={setItemQty} onSetItemText={setItemText}
           weekRecipeCount={weekRecipeList().length} onAddWeek={addWeekToGrocery}
           onOpenFull={() => { setGroceryOpen(false); navigate("lists", { listId: GROCERY_ID }); }} />
       )}
@@ -1567,7 +1606,7 @@ export default function App() {
 }
 
 // ─── Grocery quick-drawer ─────────────────────────────────────────────────────
-function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onOpenFull, weekRecipeCount, onAddWeek }) {
+function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onOpenFull, weekRecipeCount, onAddWeek }) {
   const [input, setInput] = useState("");
   const [msg, setMsg] = useState("");
   const [confirmDel, setConfirmDel] = useState(false);
@@ -1603,7 +1642,7 @@ function GroceryDrawer({ list, onClose, onAddItem, onToggleItem, onDeleteItem, o
           {items.length === 0 ? (
             <div style={s.listEmptyState}><div style={{fontSize:28,marginBottom:8}}>🛒</div><div style={s.listEmptyStateText}>Grocery list is empty. Add items above.</div></div>
           ) : (
-            <ListItemsList items={items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} qtyEditable={true} />
+            <ListItemsList items={items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} onSetText={onSetItemText} qtyEditable={true} />
           )}
         </div>
 
@@ -1884,11 +1923,6 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
       return next;
     });
     closeModal();
-  };
-
-  const clearMeal = (day, slot, e) => {
-    e.stopPropagation();
-    setWeek(prev => ({ ...prev, [day]: { ...prev[day], [slot]: { meal:"", thaw:false, thawDays:2, recipeId:null } } }));
   };
 
   const clearDay = (day) => {
@@ -2196,7 +2230,7 @@ function PlannerView({ recipesBySlot, recipes, onViewRecipe, onCreateRecipeFromM
             const hasThaw = MEAL_SLOTS.some(sl=>week[day][sl].meal&&week[day][sl].thaw);
             const hasMeals = MEAL_SLOTS.some(sl=>week[day][sl].meal);
             const isDayCopying = dayCopyDay===day;
-            const dayKey = getDateForDay(day, viewedWeekStart).toISOString().split("T")[0];
+            const dayKey = toLocalYMD(getDateForDay(day, viewedWeekStart));
             const dayWeather = weatherData[dayKey];
             return (
               <div key={day} style={{...s.card,...(isToday?s.cardToday:{}),...(hasThaw?s.cardThaw:{})}} className="day-card">
@@ -2902,7 +2936,7 @@ function RecipeGrid({ recipes, onNew, onSelect, onImported, onSetStatus, lastMad
       ) : filtered.length===0 ? (
         <div style={s.recipeEmpty}><div style={s.recipeEmptyIcon}>🔍</div><div style={s.recipeEmptyTitle}>No matches</div><div style={s.recipeEmptyText}>Try a different search or filter.</div></div>
       ) : (
-        <div style={s.recipeGrid}>
+        <div style={s.recipeGrid} className="recipe-grid">
           {filtered.map(r => {
             const total = formatMinutes(parseMinutes(r.prepTime)+parseMinutes(r.cookTime));
             const st = statusMeta(r.status || "want");
@@ -3126,7 +3160,7 @@ function RecipeEditor({ recipe: initialRecipe, onSave, onCancel, customTags, onA
           <div style={s.photoActions}>
             <label style={s.photoUploadBtn}>
               📷 {r.photo?"Change photo":"Upload photo"}
-              <input type="file" accept="image/*" style={{display:"none"}} onChange={async e=>{const f=e.target.files?.[0];if(f)set("photo",await resizeImage(f));e.target.value="";}} />
+              <input type="file" accept="image/*" style={{display:"none"}} onChange={e=>{const f=e.target.files?.[0];if(f)resizeImage(f).then(p=>set("photo",p)).catch(()=>{});e.target.value="";}} />
             </label>
             <span style={s.photoOrText}>or</span>
             <input style={{...s.editorInput,flex:1,fontSize:12}} placeholder="Paste image URL…"
@@ -3259,15 +3293,24 @@ const computeDupKeys = (items) => {
 
 const abbrev = (str, n) => (str && str.length > n ? str.slice(0, n - 1) + "…" : str || "");
 
-function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEditable, showArrows, isFirst, isLast, onMoveUp, onMoveDown }) {
+function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetText, qtyEditable, showArrows, isFirst, isLast, onMoveUp, onMoveDown }) {
   const [showSrc, setShowSrc] = useState(false);
   const [editingQty, setEditingQty] = useState(false);
   const [qtyInput, setQtyInput] = useState("");
+  const [editingText, setEditingText] = useState(false);
+  const [textInput, setTextInput] = useState("");
   const measures = formatMeasures(item.measures);
   const sources = item.sources || [];
   const hasSrc = sources.length > 0;
   const startEdit = () => { setQtyInput(measures); setEditingQty(true); };
   const saveQty = () => { onSetQty && onSetQty(listId, item.id, qtyInput); setEditingQty(false); };
+  // Renaming is only offered for items with no recipe sources — that's every
+  // item on a non-grocery list, plus the grocery list's own manually-added
+  // ("Added by you") items. Recipe-sourced grocery items stay locked so the
+  // name can't drift from the ingredient it represents.
+  const textEditable = !hasSrc && !!onSetText;
+  const startEditText = () => { setTextInput(item.text); setEditingText(true); };
+  const saveText = () => { onSetText && onSetText(listId, item.id, textInput); setEditingText(false); };
   return (
     <div style={s.listItemRow}>
       <button style={{...s.listCheck,...(item.checked?s.listCheckOn:{})}} className="list-check" onClick={() => onToggle(listId, item.id)}>{item.checked ? "✓" : ""}</button>
@@ -3278,8 +3321,11 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
                 ? <button style={s.listItemQtyBtn} className="list-qty-btn" onClick={startEdit}>{measures}{item.manual && hasSrc ? " ✎" : ""}</button>
                 : <span style={s.listItemQty}>{measures} </span>)
             : (qtyEditable && !item.checked ? <button style={s.listItemQtyAdd} className="list-qty-btn" onClick={startEdit}>+ qty</button> : null)}
-          {measures && qtyEditable ? " " : ""}{item.text}
-          {isDup && <span style={s.listItemDup} title="Also on the list from another source">dup</span>}
+          {measures && qtyEditable ? " " : ""}
+          {!editingText && (textEditable
+            ? <button style={s.listItemTextBtn} className="list-text-btn" onClick={startEditText}>{item.text}</button>
+            : item.text)}
+          {!editingText && isDup && <span style={s.listItemDup} title="Also on the list from another source">dup</span>}
         </div>
         {editingQty && (
           <div style={s.listQtyEditRow}>
@@ -3287,6 +3333,14 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
               onChange={e => setQtyInput(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") saveQty(); if (e.key === "Escape") setEditingQty(false); }}
               onBlur={saveQty} />
+          </div>
+        )}
+        {editingText && (
+          <div style={s.listQtyEditRow}>
+            <input style={s.listTextEditInput} autoFocus value={textInput} placeholder="Item name"
+              onChange={e => setTextInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") saveText(); if (e.key === "Escape") setEditingText(false); }}
+              onBlur={saveText} />
           </div>
         )}
         {hasSrc && showSrc && (
@@ -3312,7 +3366,7 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, qtyEdi
 
 // Shared renderer: manual items pinned on top, a thin divider, then recipe-sourced
 // items, then checked items at the bottom.
-function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditable, sortMode = "manual", filter = "", onMove }) {
+function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, onSetText, qtyEditable, sortMode = "manual", filter = "", onMove }) {
   const dupKeys = computeDupKeys(items);
   const q = (filter || "").trim().toLowerCase();
   const matches = (it) => !q || (it.text || "").toLowerCase().includes(q);
@@ -3325,7 +3379,7 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditabl
     const ids = group ? group.map(x => x.id) : null;
     const idx = ids ? ids.indexOf(it.id) : -1;
     return <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))}
-      onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} qtyEditable={qtyEditable}
+      onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} onSetText={onSetText} qtyEditable={qtyEditable}
       showArrows={arrowsOn && !!group} isFirst={idx === 0} isLast={idx === (ids ? ids.length - 1 : 0)}
       onMoveUp={() => onMove(listId, it.id, -1, ids)} onMoveDown={() => onMove(listId, it.id, +1, ids)} />;
   };
@@ -3368,12 +3422,12 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, qtyEditabl
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onShopping, listSorts, onSetSort, onMoveItem, userEmail, onSignOut }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onRemoveRecipes, onShopping, listSorts, onSetSort, onMoveItem, userEmail, onSignOut }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
-      onSetItemQty={onSetItemQty} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping}
+      onSetItemQty={onSetItemQty} onSetItemText={onSetItemText} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping}
       sortMode={listSorts?.[open.id] || "manual"} onSetSort={onSetSort} onMoveItem={onMoveItem} />;
   }
   return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} userEmail={userEmail} onSignOut={onSignOut} />;
@@ -3453,7 +3507,7 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList, userEmail, onSignOut 
   );
 }
 
-function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onRemoveRecipes, onUpdateList, onDeleteList, onShopping, sortMode = "manual", onSetSort, onMoveItem }) {
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onRemoveRecipes, onUpdateList, onDeleteList, onShopping, sortMode = "manual", onSetSort, onMoveItem }) {
   const [input, setInput] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -3567,7 +3621,7 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
             <div style={s.listEmptyStateText}>{isGrocery ? "Your grocery list is empty. Add items above." : "Nothing here yet. Add your first item above."}</div>
           </div>
         ) : (
-          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} qtyEditable={isGrocery}
+          <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} onSetText={onSetItemText} qtyEditable={isGrocery}
             sortMode={sortMode} filter={input} onMove={onMoveItem} />
         )}
         <div style={{height:40}} />
@@ -3656,7 +3710,6 @@ const s = {
   weekPickerDot: { fontSize:8, color:"#89c4a1", marginLeft:4 },
   eyebrow: { fontSize:11, letterSpacing:"0.15em", textTransform:"uppercase", color:"#a08060", marginBottom:3, fontFamily:"'DM Sans',sans-serif" },
   title: { margin:0, fontSize:"clamp(22px,5vw,34px)", fontWeight:700, color:"#f4e4c4", letterSpacing:"-0.02em", lineHeight:1.1 },
-  weekRange: { fontSize:12, color:"#9a7f60", marginTop:3, fontFamily:"'DM Sans',sans-serif" },
   syncIndicator: { fontSize:10, marginTop:3, fontFamily:"'DM Sans',sans-serif", letterSpacing:"0.04em" },
   syncOk: { color:"#78c878" },
   syncBusy: { color:"#9a9a60" },
@@ -3706,8 +3759,6 @@ const s = {
   extrasBtnIcon: { fontSize:16, lineHeight:1 },
   extrasBtnLabel: { fontSize:10, color:"#9a7f60", letterSpacing:"0.06em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif" },
   extrasBadge: { position:"absolute", top:-5, right:-5, background:"#e07a5f", color:"#fff", borderRadius:10, padding:"1px 5px", fontSize:9, fontWeight:700, fontFamily:"'DM Sans',sans-serif" },
-  legend: { display:"flex", gap:12, marginTop:12, maxWidth:960, margin:"12px auto 0", flexWrap:"wrap" },
-  legendItem: { display:"flex", alignItems:"center", gap:5, fontSize:11, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
   dot: { width:7, height:7, borderRadius:"50%", display:"inline-block" },
 
   prepBanner: { background:"#1a2420", borderBottom:"1px solid #2a3d38", padding:"0 16px" },
@@ -4017,8 +4068,10 @@ const s = {
   listItemQty: { color:"#f4c97a", fontWeight:700 },
   listItemQtyBtn: { background:"none", border:"none", padding:0, color:"#f4c97a", fontWeight:700, fontSize:"inherit", fontFamily:"inherit", cursor:"pointer", textDecoration:"underline", textDecorationStyle:"dotted", textUnderlineOffset:3 },
   listItemQtyAdd: { background:"none", border:"1px dashed #4a3c2a", borderRadius:6, padding:"0 6px", color:"#7a6448", fontSize:11, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", marginRight:5 },
+  listItemTextBtn: { background:"none", border:"none", padding:0, margin:0, color:"inherit", fontWeight:"inherit", fontSize:"inherit", fontFamily:"inherit", lineHeight:"inherit", textAlign:"left", cursor:"pointer" },
   listQtyEditRow: { marginTop:6 },
   listQtyInput: { width:"100%", maxWidth:160, background:"#1c1712", border:"1.5px solid #c8a878", borderRadius:8, padding:"6px 10px", fontSize:14, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" },
+  listTextEditInput: { width:"100%", background:"#1c1712", border:"1.5px solid #c8a878", borderRadius:8, padding:"6px 10px", fontSize:15, color:"#f0e8d8", fontFamily:"'DM Sans',sans-serif", outline:"none", boxSizing:"border-box" },
   listItemSrcNames: { fontSize:11.5, color:"#89a98c", fontFamily:"'DM Sans',sans-serif", marginTop:4, display:"flex", flexDirection:"column", gap:2 },
   listItemSrcQty: { color:"#7ab89a", fontWeight:700 },
   listItemSrcOverride: { color:"#c8a878", marginTop:2, paddingTop:2, borderTop:"1px solid #2a2a22" },
@@ -4134,8 +4187,6 @@ const css = `
   * { box-sizing: border-box; margin: 0; }
   .day-card:hover { border-color: #5a4a36 !important; transform: translateY(-1px); }
   .meal-slot:hover { background: #2e2418; border-color: #5a4a36 !important; }
-  .meal-slot:hover .clear-btn { opacity: 1 !important; }
-  .clear-btn:hover { color: #e07a5f !important; }
   .bin-item:hover .bin-remove { opacity: 1 !important; }
   .bin-add-btn:hover { background: #4a3c2a !important; }
   .extras-btn:hover, .clear-week-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
@@ -4148,7 +4199,6 @@ const css = `
   .shop-row:active { background: #221a12; }
   .shop-aisle-btn:hover { opacity: 1 !important; }
   .shop-retry:hover { background: #4a2e1c !important; }
-  .shop-picker-item:hover { border-color: #c8a878 !important; }
   .layout-move:hover { background: #3a2e22 !important; color: #f4c97a !important; }
   .list-check:hover { border-color: #8ac878 !important; }
   .list-menu-item:hover { background: #3a2e22 !important; }
@@ -4164,6 +4214,7 @@ const css = `
   .create-recipe-btn:hover { border-color: #6a4a9a !important; background: #261e3e !important; }
   .remove-grocery-btn:hover { border-color: #8a4838 !important; background: #3a2620 !important; }
   .list-qty-btn:hover { color: #f4e060 !important; }
+  .list-text-btn:hover { text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px; }
   .sign-out-btn:hover { border-color: #5a4a36 !important; background: #2e2418 !important; }
   .grocery-fab:active { transform: scale(0.96); }
   @keyframes drawerIn { from{transform:translateX(100%)} to{transform:none} }
