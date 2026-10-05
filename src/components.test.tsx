@@ -1,9 +1,69 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup } from "@testing-library/react";
-import { RecipesView, TagPicker, ListDetail, ListItemsList, ListIndex } from "./App";
+import { RecipesView, TagPicker, ListDetail, ListItemsList, ListIndex, SparkPoolEditor } from "./App";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+// ─── Boost mode ─────────────────────────────────────────────────────────────────
+describe("Boost mode", () => {
+  const pool = { interest: ["Play music"], novelty: ["New spot"], challenge: ["Beat the clock"], urgency: ["10 min timer"] };
+  const list = { id: "L1", name: "Chores", type: "custom", icon: "📝", items: [
+    { id: "t1", text: "Dishes", checked: false, position: 0, measures: [], sources: [], category: JSON.stringify({ c: "challenge", t: "Beat the clock" }) },
+    { id: "t2", text: "Laundry", checked: false, position: 1, measures: [], sources: [], category: JSON.stringify({ c: "urgency", t: "10 min timer" }) },
+  ] };
+  const renderDetail = (over = {}) =>
+    render(<ListDetail list={list} onBack={vi.fn()} onAddItem={vi.fn()} onToggleItem={vi.fn()}
+      onDeleteItem={vi.fn()} onClearItems={vi.fn()} onUpdateList={vi.fn()} onDeleteList={vi.fn()}
+      onShopping={vi.fn()} sparkPool={pool} onSetMode={vi.fn()} onSetItemSpark={vi.fn()} {...over} />);
+
+  it("the menu toggles Boost mode on for a custom list", () => {
+    const onSetMode = vi.fn();
+    renderDetail({ onSetMode });
+    expect(screen.queryByText("🎯 Just one")).toBeNull();
+    fireEvent.click(screen.getByText("⋯"));
+    fireEvent.click(screen.getByText("⚡ Boost mode"));
+    expect(onSetMode).toHaveBeenCalledWith("L1", "boost");
+  });
+
+  it("with Boost on, each open task shows a spark; picking one saves it to that task", () => {
+    const onSetItemSpark = vi.fn();
+    renderDetail({ boost: true, onSetItemSpark });
+    fireEvent.click(screen.getByText("Beat the clock")); // the Dishes spark chip
+    fireEvent.click(screen.getByText("Interest"));        // Interest tab in the picker
+    fireEvent.click(screen.getByText("Play music"));
+    expect(onSetItemSpark).toHaveBeenCalledWith("L1", "t1", { c: "interest", t: "Play music" });
+  });
+
+  it("Just one shows the first open task; Skip moves on and Done checks it off", () => {
+    const onToggleItem = vi.fn();
+    renderDetail({ boost: true, onToggleItem });
+    fireEvent.click(screen.getByText("🎯 Just one"));
+    expect(screen.getAllByText("Dishes").length).toBeGreaterThan(1); // list row + focus card
+    fireEvent.click(screen.getByText("Skip →"));
+    fireEvent.click(screen.getByText("✓ Done"));
+    expect(onToggleItem).toHaveBeenCalledWith("L1", "t2");
+  });
+
+  it("grocery lists don't offer Boost mode", () => {
+    renderDetail({ list: { ...list, id: "grocery", type: "grocery" } });
+    fireEvent.click(screen.getByText("⋯"));
+    expect(screen.queryByText("⚡ Boost mode")).toBeNull();
+  });
+
+  it("the pool editor adds manually and merges generated sparks", async () => {
+    const onSave = vi.fn();
+    const onGenerate = vi.fn().mockResolvedValue({ interest: ["Play music", "Snack break"] });
+    render(<SparkPoolEditor pool={pool} onSave={onSave} onGenerate={onGenerate} tasks={["Dishes"]} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText("Add an interest spark…"), { target: { value: "Call a friend" } });
+    fireEvent.click(screen.getByText("Add"));
+    expect(onSave.mock.calls[0][0].interest).toEqual(["Play music", "Call a friend"]);
+    fireEvent.click(screen.getByText("✨ More interest"));
+    expect(onGenerate).toHaveBeenCalledWith({ cat: "interest", tasks: ["Dishes"] });
+    await screen.findByText("✓ Added 1 new spark");
+    expect(onSave.mock.calls[1][0].interest).toEqual(["Play music", "Snack break"]);
+  });
+});
 
 const blankRecipe = (over = {}) => ({
   id: "new1", name: "", description: "", url: "", photo: "", notes: "",

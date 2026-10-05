@@ -639,6 +639,108 @@ const sortRecipes = (recipes, mode) => {
   return arr;
 };
 
+// ─── Boost mode (INCU sparks) ─────────────────────────────────────────────────
+// A per-list toggle for to-do lists: each open task gets paired with a "spark"
+// from one of the four levers of an interest-based nervous system — Interest,
+// Novelty, Challenge, Urgency — to help kick-start it. Sparks are generic
+// one-liners kept in a shared, editable pool (app_settings `spark_pool`, grown
+// on demand via /api/sparks), so day-to-day use costs no API credits.
+const SPARK_CATS = [
+  { id: "interest", label: "Interest", icon: "💡", blurb: "Tie it to something you enjoy", color: "#f4c97a" },
+  { id: "novelty", label: "Novelty", icon: "✨", blurb: "Make it new or a bit weird", color: "#c4aae8" },
+  { id: "challenge", label: "Challenge", icon: "🎯", blurb: "Turn it into a game or a test", color: "#8ac878" },
+  { id: "urgency", label: "Urgency", icon: "⏰", blurb: "Give it a real, short deadline", color: "#e8907a" },
+];
+const sparkCat = (id) => SPARK_CATS.find(c => c.id === id) || SPARK_CATS[0];
+const DEFAULT_SPARK_POOL = {
+  interest: [
+    "Put on a podcast or album you've been saving for this",
+    "Pair it with a favorite drink or snack",
+    "Start with the one part you actually don't mind",
+    "Call or voice-message a friend while you do it",
+  ],
+  novelty: [
+    "Do it somewhere different than usual",
+    "Start from the end, or the weirdest part, instead of the beginning",
+    "Narrate it out loud like a cooking-show host",
+    "Try a tool or method you've never used for it",
+  ],
+  challenge: [
+    "Speedrun it: guess how long it'll take, then beat that",
+    "See how far you get before one song ends",
+    "Do the hardest 2 minutes first, then decide if you keep going",
+    "Just nail the very first step — that's the whole goal",
+  ],
+  urgency: [
+    "Set a 10-minute timer. You can stop when it rings",
+    "Get it done before your next meal",
+    "Tell someone you'll send a photo when it's done in 30 minutes",
+    "Start in the next 60 seconds — before you talk yourself out of it",
+  ],
+};
+// Coerce a stored pool into {cat: string[]}. A missing category falls back to
+// the defaults; an explicitly-emptied one stays empty (the user cleared it).
+const normalizeSparkPool = (v) => {
+  const out = {};
+  SPARK_CATS.forEach(c => {
+    const arr = v && Array.isArray(v[c.id]) ? v[c.id] : DEFAULT_SPARK_POOL[c.id];
+    out[c.id] = arr.map(x => String(x ?? "").trim()).filter(Boolean);
+  });
+  return out;
+};
+// Append new sparks per category, skipping case-insensitive duplicates.
+const mergeSparkPool = (pool, additions) => {
+  const out = normalizeSparkPool(pool);
+  let added = 0;
+  SPARK_CATS.forEach(c => {
+    const seen = new Set(out[c.id].map(t => t.toLowerCase()));
+    ((additions && additions[c.id]) || []).forEach(raw => {
+      const t = String(raw ?? "").trim();
+      if (t && !seen.has(t.toLowerCase())) { seen.add(t.toLowerCase()); out[c.id].push(t); added++; }
+    });
+  });
+  return { pool: out, added };
+};
+// A task's chosen spark lives in its list_items.category column as JSON
+// ({c,t}) — custom lists never use that column (grocery aisles are cached by
+// ingredient name in app_settings), so no migration is needed.
+const parseSpark = (raw) => {
+  if (!raw || typeof raw !== "string" || raw[0] !== "{") return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && SPARK_CATS.some(c => c.id === v.c) && typeof v.t === "string" && v.t.trim() ? { c: v.c, t: v.t } : null;
+  } catch { return null; }
+};
+const sparkToStr = (sp) => (sp ? JSON.stringify({ c: sp.c, t: sp.t }) : "");
+const strHash = (str) => { let h = 0; for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0; return Math.abs(h); };
+const allSparks = (pool) => SPARK_CATS.flatMap(c => ((pool && pool[c.id]) || []).map(t => ({ c: c.id, t })));
+// The spark shown for a task: its saved one, else a stable pick from the pool
+// keyed on the item id (so it doesn't jump between renders/devices and costs no
+// write). Picks the category first so the four levers spread evenly.
+const itemSpark = (item, pool) => {
+  const saved = parseSpark(item.category);
+  if (saved) return saved;
+  const cats = SPARK_CATS.filter(c => pool && (pool[c.id] || []).length);
+  if (!cats.length) return null;
+  const h = strHash(String(item.id));
+  const c = cats[h % cats.length].id;
+  return { c, t: pool[c][Math.floor(h / cats.length) % pool[c].length] };
+};
+// A different spark than `cur` (optionally within one category). `rand` is
+// injectable for tests.
+const nextSpark = (cur, pool, cat, rand = Math.random) => {
+  const cands = allSparks(pool).filter(sp => (!cat || sp.c === cat) && !(cur && sp.c === cur.c && sp.t === cur.t));
+  return cands.length ? cands[Math.floor(rand() * cands.length)] : (cur || null);
+};
+// "Just one" queue: open tasks in the list's sort order, with skipped tasks
+// moved to the back (in the order they were skipped).
+const focusQueue = (items, sortMode, skipped = []) => {
+  const open = sortListItems(items.filter(i => !i.checked), sortMode);
+  const later = open.filter(i => skipped.includes(i.id)).sort((a, b) => skipped.indexOf(a.id) - skipped.indexOf(b.id));
+  return [...open.filter(i => !skipped.includes(i.id)), ...later];
+};
+const formatClock = (secs) => { const s2 = Math.max(0, Math.ceil(secs)); return `${Math.floor(s2 / 60)}:${String(s2 % 60).padStart(2, "0")}`; };
+
 // "Last made" = most recent past week this recipe was planned (from the meals
 // table). Relative for recent weeks, falls back to a month/year for older.
 const lastMadeLabel = (ws, nowMonday) => {
@@ -662,12 +764,13 @@ export {
   layoutPickerOrder, addWeeks, getWeeksInMonth, weekStart, toLocalYMD,
   mealRow, mealCellEq, sortListItems,
   sortRecipes, nextRecipeStatus, lastMadeLabel,
+  SPARK_CATS, DEFAULT_SPARK_POOL, normalizeSparkPool, mergeSparkPool, parseSpark, sparkToStr, itemSpark, nextSpark, focusQueue, formatClock,
 };
 
 // Prop-driven components exported for component tests (see src/components.test.tsx).
 // Function declarations hoist, so this works before their definitions below.
 export {
-  RecipesView, TagPicker, ListDetail, ListItemsList, ListIndex, ShoppingMode,
+  RecipesView, TagPicker, ListDetail, ListItemsList, ListIndex, ShoppingMode, FocusMode, SparkPoolEditor,
 };
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -763,6 +866,8 @@ export default function App() {
   const [ingredientCats, setIngredientCats] = useState({});
   const [listSorts, setListSorts] = useState({}); // { [listId]: "manual"|"az"|"za"|"recent"|"oldest" }, synced via app_settings
   const [storeLayout, setStoreLayout] = useState(DEFAULT_STORE_LAYOUT);
+  const [listModes, setListModes] = useState({}); // { [listId]: "boost" }, synced via app_settings
+  const [sparkPool, setSparkPool] = useState(() => normalizeSparkPool(null)); // { interest:[], novelty:[], challenge:[], urgency:[] }
   const [shoppingOpen, setShoppingOpen] = useState(false);
   const [catStatus, setCatStatus] = useState(""); // "", "loading", or an error message
   const shoppingPopRef = useRef(false);
@@ -1017,7 +1122,7 @@ export default function App() {
         sb.get("list_items", "?order=created_at.asc").catch(() => []),
       ]);
       const recipeRows = wantRecipes ? await sb.get("recipes", "?order=created_at.asc") : null;
-      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories,store_layout,list_sorts)").catch(() => []);
+      const settingsRows = await sb.get("app_settings", "?key=in.(custom_tags,ingredient_categories,store_layout,list_sorts,list_modes,spark_pool)").catch(() => []);
 
       const parseWeekRows = (rows) => {
         const w = initialWeek();
@@ -1096,6 +1201,8 @@ export default function App() {
       const catsVal = settingsRows.find(r => r.key === "ingredient_categories")?.value || null;
       const layoutVal = settingsRows.find(r => r.key === "store_layout")?.value || null;
       const sortsVal = settingsRows.find(r => r.key === "list_sorts")?.value || null;
+      const modesVal = settingsRows.find(r => r.key === "list_modes")?.value || null;
+      const sparkPoolVal = settingsRows.find(r => r.key === "spark_pool")?.value || null;
 
       // Skip all setState when nothing changed since the last load (avoids a
       // full re-render on every poll). Recipes fall back to the current ref when
@@ -1109,7 +1216,7 @@ export default function App() {
       // fetch, so re-stringifying them (MBs of base64 photos) every 10s is waste.
       const recipesSig = mappedRecipes ? JSON.stringify(mappedRecipes) : lastRecipesSigRef.current;
       if (mappedRecipes) lastRecipesSigRef.current = recipesSig;
-      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, sortsVal]) + "|" + recipesSig;
+      const sig = JSON.stringify([mergedWeek, nextNext, nextPrev, builtLists, serverSnacks, serverDesserts, customTagsVal, catsVal, layoutVal, sortsVal, modesVal, sparkPoolVal]) + "|" + recipesSig;
       if (sig === lastPayloadSigRef.current) { hasLoadedRef.current = true; setSyncStatus("synced"); return; }
       lastPayloadSigRef.current = sig;
 
@@ -1126,6 +1233,8 @@ export default function App() {
       if (catsVal) setIngredientCats(catsVal);
       if (Array.isArray(layoutVal) && layoutVal.length) setStoreLayout(layoutVal);
       if (sortsVal && typeof sortsVal === "object") setListSorts(sortsVal);
+      if (modesVal && typeof modesVal === "object") setListModes(modesVal);
+      if (sparkPoolVal && typeof sparkPoolVal === "object") setSparkPool(normalizeSparkPool(sparkPoolVal));
 
       hasLoadedRef.current = true;
       setSyncStatus("synced");
@@ -1505,6 +1614,41 @@ export default function App() {
     });
   };
 
+  // ─── Boost mode ──────────────────────────────────────────────────────────────
+  const setListMode = (listId, mode) => {
+    setListModes(prev => {
+      const next = { ...prev };
+      if (mode) next[listId] = mode; else delete next[listId];
+      dbWrite("Couldn't save Boost mode", () => sb.upsert("app_settings", [{ key: "list_modes", value: next }], "key"));
+      return next;
+    });
+  };
+  const saveSparkPool = (next) => {
+    const pool = normalizeSparkPool(next);
+    setSparkPool(pool);
+    dbWrite("Couldn't save the spark pool", () => sb.upsert("app_settings", [{ key: "spark_pool", value: pool }], "key"));
+  };
+  // Pin a spark to one task (stored in the item's `category` column).
+  const setItemSpark = (listId, itemId, spark) => {
+    const cur = lists.find(l => l.id === listId); const it = cur && cur.items.find(x => x.id === itemId); if (!it) return;
+    const updated = { ...it, category: sparkToStr(spark) };
+    setLists(prev => prev.map(l => l.id !== listId ? l : { ...l, items: l.items.map(x => x.id === itemId ? updated : x) }));
+    trackPending(itemId, { kind: "item", listId, item: updated });
+    syncWrite("Couldn't save the spark", () => sb.upsert("list_items", [listItemToRow(updated, listId)], "id"), [itemId]);
+  };
+  // Ask Claude for fresh sparks (one category or all), using a few task names
+  // as flavor. Resolves to {cat: string[]}; throws an Error with a user-facing message.
+  const generateSparks = async ({ cat, tasks }) => {
+    const resp = await fetch("/api/sparks", {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${_authToken || ""}` },
+      body: JSON.stringify({ category: cat || null, existing: sparkPool, tasks: (tasks || []).slice(0, 15) }),
+    }).catch(() => null);
+    if (!resp) throw new Error("Couldn't reach the spark generator.");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.message || "Couldn't generate sparks.");
+    return data.sparks || {};
+  };
+
   if (isConfigured && !session) return <Login onSignIn={handleSignIn} />;
 
   return (
@@ -1557,6 +1701,8 @@ export default function App() {
             onAddItem={addListItem} onToggleItem={toggleListItem} onDeleteItem={deleteListItem} onClearItems={clearListItems}
             onSetItemQty={setItemQty} onSetItemText={setItemText} onRemoveRecipes={removeRecipesFromGrocery} onShopping={openShopping}
             listSorts={listSorts} onSetSort={setListSort} onMoveItem={reorderListItem}
+            listModes={listModes} onSetMode={setListMode} sparkPool={sparkPool} onSaveSparkPool={saveSparkPool}
+            onSetItemSpark={setItemSpark} onGenerateSparks={generateSparks}
             userEmail={session?.user?.email} onSignOut={signOut} />
         )}
       </div>
@@ -3294,7 +3440,7 @@ const computeDupKeys = (items) => {
 
 const abbrev = (str, n) => (str && str.length > n ? str.slice(0, n - 1) + "…" : str || "");
 
-function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetText, qtyEditable,
+function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetText, qtyEditable, spark, onSpark,
   dragHandle, rowRef, isDragging, dragOffsetY, onDragStart, onDragMove, onDragEnd, onDragCancel }) {
   const [showSrc, setShowSrc] = useState(false);
   const [editingQty, setEditingQty] = useState(false);
@@ -3345,6 +3491,12 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetT
               onBlur={saveText} />
           </div>
         )}
+        {spark && !item.checked && !editingText && (
+          <button style={{...s.sparkChip, color: sparkCat(spark.c).color}} className="spark-chip" onClick={() => onSpark && onSpark(item)}
+            title={`${sparkCat(spark.c).label} — tap to change`}>
+            <span style={s.sparkChipIcon}>{sparkCat(spark.c).icon}</span>{spark.t}
+          </button>
+        )}
         {hasSrc && showSrc && (
           <div style={s.listItemSrcNames}>
             {sources.map(sr => (
@@ -3366,7 +3518,7 @@ function ListItemRow({ item, listId, isDup, onToggle, onDelete, onSetQty, onSetT
 
 // Shared renderer: manual items pinned on top, a thin divider, then recipe-sourced
 // items, then checked items at the bottom.
-function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, onSetText, qtyEditable, sortMode = "manual", filter = "", onMove }) {
+function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, onSetText, qtyEditable, sortMode = "manual", filter = "", onMove, sparkFor, onSpark }) {
   const dupKeys = computeDupKeys(items);
   const q = (filter || "").trim().toLowerCase();
   const matches = (it) => !q || (it.text || "").toLowerCase().includes(q);
@@ -3428,6 +3580,7 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, onSetText,
     const isDragging = dragging?.id === it.id;
     return <ListItemRow key={it.id} item={it} listId={listId} isDup={dupKeys.has(groceryKey(it.text))}
       onToggle={onToggle} onDelete={onDelete} onSetQty={onSetQty} onSetText={onSetText} qtyEditable={qtyEditable}
+      spark={sparkFor && !it.checked ? sparkFor(it) : null} onSpark={onSpark}
       dragHandle={dragHandle} rowRef={dragHandle ? setRowRef(it.id) : undefined}
       isDragging={isDragging} dragOffsetY={isDragging ? dragging.offsetY : 0}
       onDragStart={dragHandle ? (e) => onDragPointerDown(e, ids, it.id) : undefined}
@@ -3472,13 +3625,16 @@ function ListItemsList({ items, listId, onToggle, onDelete, onSetQty, onSetText,
   );
 }
 
-function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onRemoveRecipes, onShopping, listSorts, onSetSort, onMoveItem, userEmail, onSignOut }) {
+function ListsView({ lists, openId, syncStatus, onOpen, onAddList, onUpdateList, onDeleteList, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onRemoveRecipes, onShopping, listSorts, onSetSort, onMoveItem,
+  listModes, onSetMode, sparkPool, onSaveSparkPool, onSetItemSpark, onGenerateSparks, userEmail, onSignOut }) {
   const open = openId ? lists.find(l => l.id === openId) : null;
   if (open) {
     return <ListDetail list={open} onBack={() => onOpen(null)}
       onAddItem={onAddItem} onToggleItem={onToggleItem} onDeleteItem={onDeleteItem} onClearItems={onClearItems}
       onSetItemQty={onSetItemQty} onSetItemText={onSetItemText} onRemoveRecipes={onRemoveRecipes} onUpdateList={onUpdateList} onDeleteList={onDeleteList} onShopping={onShopping}
-      sortMode={listSorts?.[open.id] || "manual"} onSetSort={onSetSort} onMoveItem={onMoveItem} />;
+      sortMode={listSorts?.[open.id] || "manual"} onSetSort={onSetSort} onMoveItem={onMoveItem}
+      boost={listModes?.[open.id] === "boost"} onSetMode={onSetMode} sparkPool={sparkPool} onSaveSparkPool={onSaveSparkPool}
+      onSetItemSpark={onSetItemSpark} onGenerateSparks={onGenerateSparks} />;
   }
   return <ListIndex lists={lists} syncStatus={syncStatus} onOpen={onOpen} onAddList={onAddList} userEmail={userEmail} onSignOut={onSignOut} />;
 }
@@ -3557,7 +3713,8 @@ function ListIndex({ lists, syncStatus, onOpen, onAddList, userEmail, onSignOut 
   );
 }
 
-function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onRemoveRecipes, onUpdateList, onDeleteList, onShopping, sortMode = "manual", onSetSort, onMoveItem }) {
+function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onClearItems, onSetItemQty, onSetItemText, onRemoveRecipes, onUpdateList, onDeleteList, onShopping, sortMode = "manual", onSetSort, onMoveItem,
+  boost = false, onSetMode, sparkPool, onSaveSparkPool, onSetItemSpark, onGenerateSparks }) {
   const [input, setInput] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -3567,6 +3724,16 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
   const [dbrSelected, setDbrSelected] = useState(() => new Set());
   const [confirm, setConfirm] = useState(null);        // {icon,title,body,label,onYes} for destructive actions
   const isGrocery = list.type === "grocery";
+  const boostOn = boost && !isGrocery;
+  const pool = sparkPool || DEFAULT_SPARK_POOL;
+  // Boost-mode overlays, innermost first: spark picker > pool editor > focus view.
+  const [focusOpen, setFocusOpen] = useState(false);
+  const [poolOpen, setPoolOpen] = useState(false);
+  const [sparkItemId, setSparkItemId] = useState(null);
+  const sparkItem = sparkItemId ? list.items.find(i => i.id === sparkItemId) : null;
+  // Closing from a button calls history.back(); the popstate that follows must
+  // not also close the next overlay down, so it's swallowed via this counter.
+  const skipPopRef = useRef(0);
 
   const checked = list.items.filter(i => i.checked);
   const hasChecked = checked.length > 0;
@@ -3582,10 +3749,22 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
   })();
 
   useEffect(() => {
-    const onPop = () => { if (dbrOpen) setDbrOpen(false); };
+    const onPop = () => {
+      if (skipPopRef.current > 0) { skipPopRef.current--; return; }
+      if (sparkItemId) setSparkItemId(null);
+      else if (poolOpen) setPoolOpen(false);
+      else if (focusOpen) setFocusOpen(false);
+      else if (dbrOpen) setDbrOpen(false);
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [dbrOpen]);
+  }, [dbrOpen, focusOpen, poolOpen, sparkItemId]);
+  const openOverlay = (name, set) => { set(); history.pushState({ overlay: name }, ""); };
+  const closeOverlay = (unset) => { unset(); skipPopRef.current++; history.back(); };
+  const openFocus = () => openOverlay("focus", () => setFocusOpen(true));
+  const openPool = () => { setMenuOpen(false); openOverlay("sparkpool", () => setPoolOpen(true)); };
+  const openSparkPicker = (it) => openOverlay("spark", () => setSparkItemId(it.id));
+  const toggleBoost = () => { setMenuOpen(false); onSetMode && onSetMode(list.id, boostOn ? null : "boost"); };
 
   const openDbr = () => { setDbrSelected(new Set()); setDbrOpen(true); setMenuOpen(false); history.pushState({ overlay: "dbr" }, ""); };
   const closeDbr = () => { setDbrOpen(false); history.back(); };
@@ -3606,6 +3785,8 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
               <div style={s.listMenuBackdrop} onClick={() => setMenuOpen(false)} />
               <div style={s.listMenu}>
                 {!isGrocery && <button style={s.listMenuItem} className="list-menu-item" onClick={() => { setRenaming(true); setNameDraft(list.name); setMenuOpen(false); }}>✏️ Rename</button>}
+                {!isGrocery && onSetMode && <button style={s.listMenuItem} className="list-menu-item" onClick={toggleBoost}>{boostOn ? "⚡ Turn off Boost" : "⚡ Boost mode"}</button>}
+                {boostOn && <button style={s.listMenuItem} className="list-menu-item" onClick={openPool}>🗂 Spark pool</button>}
                 <button style={{...s.listMenuItem,...(hasChecked?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (!hasChecked) return; setMenuOpen(false); setConfirm({ icon:"🧹", title:`Delete ${checked.length} checked item${checked.length>1?"s":""}?`, body:"This removes the checked items from the list.", label:"Delete checked", onYes:() => onClearItems(list.id, true) }); }}>🧹 Delete checked</button>
                 {isGrocery && recipeSources.length > 0 && <button style={s.listMenuItem} className="list-menu-item" onClick={openDbr}>📖 Delete by recipe</button>}
                 <button style={{...s.listMenuItem,...(list.items.length?{}:s.listMenuItemDim)}} className="list-menu-item" onClick={() => { if (!list.items.length) return; setMenuOpen(false); setConfirm({ icon:"🗑", title:`Delete all ${list.items.length} items?`, body:`This empties ${list.name}. Can't be undone.`, label:"Delete all", onYes:() => onClearItems(list.id, false) }); }}>🗑 Delete all</button>
@@ -3631,6 +3812,14 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
 
         {isGrocery && list.items.length > 0 && (
           <button style={s.shopModeBtn} className="add-grocery-btn" onClick={onShopping}>🛒 Shopping Mode</button>
+        )}
+
+        {boostOn && (
+          <div style={s.boostBar}>
+            <button style={{...s.boostJustOne,...(list.items.some(i => !i.checked) ? {} : s.btnDisabled)}} className="boost-just-one"
+              onClick={() => list.items.some(i => !i.checked) && openFocus()}>🎯 Just one</button>
+            <button style={s.boostPoolBtn} className="boost-pool-btn" onClick={openPool} title="Spark pool">⚡ Boost on</button>
+          </div>
         )}
 
         <div style={s.listAddRow}>
@@ -3672,7 +3861,8 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
           </div>
         ) : (
           <ListItemsList items={list.items} listId={list.id} onToggle={onToggleItem} onDelete={onDeleteItem} onSetQty={onSetItemQty} onSetText={onSetItemText} qtyEditable={isGrocery}
-            sortMode={sortMode} filter={input} onMove={onMoveItem} />
+            sortMode={sortMode} filter={input} onMove={onMoveItem}
+            sparkFor={boostOn ? (it) => itemSpark(it, pool) : undefined} onSpark={boostOn ? openSparkPicker : undefined} />
         )}
         <div style={{height:40}} />
       </div>
@@ -3680,6 +3870,22 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
       {confirm && (
         <ConfirmModal icon={confirm.icon} title={confirm.title} body={confirm.body} confirmLabel={confirm.label}
           onCancel={() => setConfirm(null)} onConfirm={() => { confirm.onYes(); setConfirm(null); }} />
+      )}
+
+      {focusOpen && (
+        <FocusMode list={list} sortMode={sortMode} pool={pool} onToggle={onToggleItem}
+          onSetSpark={(itemId, sp) => onSetItemSpark && onSetItemSpark(list.id, itemId, sp)}
+          onPickSpark={openSparkPicker} onClose={() => closeOverlay(() => setFocusOpen(false))} />
+      )}
+      {poolOpen && (
+        <SparkPoolEditor pool={pool} onSave={onSaveSparkPool} onGenerate={onGenerateSparks}
+          tasks={list.items.filter(i => !i.checked).map(i => i.text)} onClose={() => closeOverlay(() => setPoolOpen(false))} />
+      )}
+      {sparkItem && (
+        <SparkPicker item={sparkItem} pool={pool} current={itemSpark(sparkItem, pool)}
+          onPick={(sp) => { onSetItemSpark && onSetItemSpark(list.id, sparkItem.id, sp); closeOverlay(() => setSparkItemId(null)); }}
+          onAddToPool={(sp) => { const { pool: next, added } = mergeSparkPool(pool, { [sp.c]: [sp.t] }); if (added && onSaveSparkPool) onSaveSparkPool(next); }}
+          onClose={() => closeOverlay(() => setSparkItemId(null))} />
       )}
 
       {dbrOpen && (
@@ -3708,6 +3914,247 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Boost mode: "Just one" focus view ────────────────────────────────────────
+// One task at a time with its spark, an optional short timer (a self-chosen,
+// low-stakes deadline), Done / Skip. Skips are session-only — the task just
+// moves to the back of the queue. Overlay history pattern ({overlay:"focus"}).
+const FOCUS_MINUTES = [5, 10, 25];
+const FOCUS_CHEERS = ["Nice. That counts.", "Done! Momentum unlocked.", "One down. 🎉", "Look at you go.", "That's a win — take it."];
+function FocusMode({ list, sortMode, pool, onToggle, onSetSpark, onPickSpark, onClose }) {
+  const [skipped, setSkipped] = useState([]);
+  const [doneCount, setDoneCount] = useState(0);
+  const [cheer, setCheer] = useState("");
+  const [mins, setMins] = useState(10);
+  const [timer, setTimer] = useState(null); // { endsAt } | null — wall-clock based so it survives backgrounding
+  const [now, setNow] = useState(() => Date.now());
+  const buzzedRef = useRef(false);
+  const queue = focusQueue(list.items, sortMode, skipped);
+  const task = queue[0] || null;
+  const spark = task ? itemSpark(task, pool) : null;
+  const cat = spark ? sparkCat(spark.c) : null;
+  const remaining = timer ? (timer.endsAt - now) / 1000 : 0;
+  const timeUp = !!timer && remaining <= 0;
+
+  useEffect(() => {
+    if (!timer) return;
+    const id = setInterval(() => setNow(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [timer]);
+  useEffect(() => {
+    if (timeUp && !buzzedRef.current) { buzzedRef.current = true; try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch {} }
+  }, [timeUp]);
+
+  const startTimer = () => { buzzedRef.current = false; const t = Date.now(); setNow(t); setTimer({ endsAt: t + mins * 60000 }); };
+  const done = () => {
+    if (!task) return;
+    onToggle(list.id, task.id);
+    setDoneCount(n => n + 1);
+    setCheer(FOCUS_CHEERS[Math.floor(Math.random() * FOCUS_CHEERS.length)]);
+    setTimer(null);
+    setTimeout(() => setCheer(""), 2200);
+  };
+  const skip = () => { if (!task) return; setSkipped(prev => [...prev.filter(x => x !== task.id), task.id]); setTimer(null); };
+  const reroll = () => { if (!task) return; const sp = nextSpark(spark, pool); if (sp) onSetSpark(task.id, sp); };
+
+  return (
+    <div style={s.shopRoot}>
+      <div style={s.shopTopBar}>
+        <button style={s.detailBackBtn} className="back-btn" onClick={onClose}>← Done</button>
+        <div style={s.shopTitle}>🎯 Just one</div>
+        <div style={s.focusDoneCount}>{doneCount > 0 ? `${doneCount} done` : ""}</div>
+      </div>
+
+      <div style={s.focusBody}>
+        {!task ? (
+          <div style={s.focusEmpty}>
+            <div style={{fontSize:46,marginBottom:10}}>🎉</div>
+            <div style={s.focusTask}>All clear</div>
+            <div style={s.focusLeft}>Nothing left on {list.name}.</div>
+            <button style={{...s.btnSave,marginTop:18}} onClick={onClose}>Back to list</button>
+          </div>
+        ) : (
+          <>
+            <div style={s.focusLeft}>{queue.length} left{list.name ? ` · ${list.name}` : ""}</div>
+            <div style={s.focusTask}>{task.text}</div>
+
+            {spark ? (
+              <div style={{...s.focusSpark, borderColor: cat.color}}>
+                <div style={{...s.focusSparkHead, color: cat.color}}>{cat.icon} {cat.label}</div>
+                <div style={s.focusSparkText}>{spark.t}</div>
+                <div style={s.focusSparkBtns}>
+                  <button style={s.focusSmallBtn} className="focus-small-btn" onClick={reroll}>🔀 Another</button>
+                  <button style={s.focusSmallBtn} className="focus-small-btn" onClick={() => onPickSpark(task)}>✎ Pick</button>
+                </div>
+              </div>
+            ) : (
+              <div style={s.focusLeft}>Your spark pool is empty — add some from ⚡ Boost on → Spark pool.</div>
+            )}
+
+            <div style={s.focusTimerBox}>
+              {timer ? (
+                <>
+                  <div style={{...s.focusClock,...(timeUp ? {color:"#e8907a"} : {})}}>{timeUp ? "⏰ Time!" : formatClock(remaining)}</div>
+                  <div style={s.focusTimerHint}>{timeUp ? "Keep rolling, or call it here — both count." : "Just this. Nothing else."}</div>
+                  <button style={s.focusSmallBtn} className="focus-small-btn" onClick={() => setTimer(null)}>Stop timer</button>
+                </>
+              ) : (
+                <>
+                  <div style={s.focusMinRow}>
+                    {FOCUS_MINUTES.map(m => (
+                      <button key={m} style={{...s.focusMinChip,...(m === mins ? s.focusMinChipOn : {})}} onClick={() => setMins(m)}>{m} min</button>
+                    ))}
+                  </div>
+                  <button style={s.focusStart} className="focus-start" onClick={startTimer}>▶ Start {mins} min</button>
+                </>
+              )}
+            </div>
+          </>
+        )}
+        {cheer && <div style={s.focusCheer} className="modal-in">{cheer}</div>}
+      </div>
+
+      {task && (
+        <div style={s.focusFoot}>
+          <button style={s.focusSkip} className="focus-skip" onClick={skip} disabled={queue.length < 2}>Skip →</button>
+          <button style={s.focusDone} className="focus-done" onClick={done}>✓ Done</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Boost mode: per-task spark picker ────────────────────────────────────────
+function SparkPicker({ item, pool, current, onPick, onAddToPool, onClose }) {
+  const [tab, setTab] = useState(current?.c || SPARK_CATS[0].id);
+  const [own, setOwn] = useState("");
+  const [saveToPool, setSaveToPool] = useState(true);
+  const cat = sparkCat(tab);
+  const opts = pool[tab] || [];
+  const submitOwn = () => {
+    const t = own.trim(); if (!t) return;
+    const sp = { c: tab, t };
+    if (saveToPool) onAddToPool(sp);
+    onPick(sp);
+  };
+  return (
+    <div style={{...s.overlay, zIndex:130}} onClick={onClose}>
+      <div style={s.sparkModal} onClick={e => e.stopPropagation()} className="modal-in">
+        <div style={s.modalHead}>
+          <div style={{minWidth:0}}><div style={s.modalEyebrow}>⚡ Pick a spark</div><div style={s.modalTitle}>{abbrev(item.text, 40)}</div></div>
+          <button style={s.modalClose} onClick={onClose}>✕</button>
+        </div>
+        <div style={s.sparkTabs}>
+          {SPARK_CATS.map(c => (
+            <button key={c.id} style={{...s.sparkTab,...(c.id === tab ? {...s.sparkTabOn, color: c.color, borderColor: c.color} : {})}} onClick={() => setTab(c.id)}>
+              <span>{c.icon}</span><span style={s.sparkTabLabel}>{c.label}</span>
+            </button>
+          ))}
+        </div>
+        <div style={s.sparkBlurb}>{cat.blurb}</div>
+        <div style={s.sparkList}>
+          {opts.length === 0 && <div style={s.sparkBlurb}>No {cat.label.toLowerCase()} sparks yet — write one below.</div>}
+          {opts.map((t, i) => {
+            const on = current && current.c === tab && current.t === t;
+            return (
+              <button key={i} style={{...s.sparkOpt,...(on ? {...s.sparkOptOn, borderColor: cat.color} : {})}} onClick={() => onPick({ c: tab, t })}>
+                {on ? "✓ " : ""}{t}
+              </button>
+            );
+          })}
+        </div>
+        <button style={{...s.btnClear,width:"100%",margin:"10px 0"}} onClick={() => onPick(nextSpark(current, pool))}>🔀 Surprise me</button>
+        <div style={s.listAddRow}>
+          <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder={`Write your own ${cat.label.toLowerCase()} spark…`} value={own}
+            onChange={e => setOwn(e.target.value)} onKeyDown={e => { if (e.key === "Enter") submitOwn(); }} />
+          <button style={{...s.btnSave,...(own.trim() ? {} : s.btnDisabled)}} onClick={submitOwn}>Use</button>
+        </div>
+        <label style={s.sparkSaveLbl}>
+          <input type="checkbox" checked={saveToPool} onChange={e => setSaveToPool(e.target.checked)} /> Also save it to the spark pool
+        </label>
+      </div>
+    </div>
+  );
+}
+
+// ─── Boost mode: spark pool editor ────────────────────────────────────────────
+// Like the aisle editor, but edits save live (so generated sparks are never
+// lost to a Cancel). Grouped by INCU category; Claude can top up one category
+// or all four on demand.
+function SparkPoolEditor({ pool, onSave, onGenerate, tasks, onClose }) {
+  const [tab, setTab] = useState(SPARK_CATS[0].id);
+  const [adding, setAdding] = useState("");
+  const [editIdx, setEditIdx] = useState(-1);
+  const [editText, setEditText] = useState("");
+  const [gen, setGen] = useState(""); // "" | "loading" | result/error message
+  const poolRef = useRef(pool); poolRef.current = pool; // latest pool for the async generate merge
+  const cat = sparkCat(tab);
+  const items = pool[tab] || [];
+  const commit = (arr) => onSave && onSave({ ...pool, [tab]: arr });
+  const add = () => { const { pool: next, added } = mergeSparkPool(pool, { [tab]: [adding] }); if (added && onSave) onSave(next); setAdding(""); };
+  const saveEdit = () => {
+    if (editIdx < 0) return;
+    const t = editText.trim(); const arr = [...items];
+    if (t) arr[editIdx] = t; else arr.splice(editIdx, 1);
+    commit(arr); setEditIdx(-1);
+  };
+  const generate = async (all) => {
+    if (!onGenerate || gen === "loading") return;
+    setGen("loading");
+    try {
+      const sparks = await onGenerate({ cat: all ? null : tab, tasks });
+      const { pool: next, added } = mergeSparkPool(poolRef.current, sparks);
+      if (added && onSave) onSave(next);
+      setGen(added ? `✓ Added ${added} new spark${added > 1 ? "s" : ""}` : "Nothing new this time — try again.");
+    } catch (e) { setGen(e?.message || "Couldn't generate sparks."); }
+  };
+  return (
+    <div style={{...s.overlay, zIndex:130}} onClick={onClose}>
+      <div style={s.layoutEditor} onClick={e => e.stopPropagation()} className="modal-in">
+        <div style={s.modalHead}>
+          <div><div style={s.modalEyebrow}>⚡ Boost mode</div><div style={s.modalTitle}>Spark pool</div></div>
+          <button style={s.modalClose} onClick={onClose}>✕</button>
+        </div>
+        <div style={s.layoutHint}>Sparks get paired with your tasks to help you start. Tap one to edit (clear it to delete). Shared across all your Boost lists.</div>
+        <div style={s.sparkTabs}>
+          {SPARK_CATS.map(c => (
+            <button key={c.id} style={{...s.sparkTab,...(c.id === tab ? {...s.sparkTabOn, color: c.color, borderColor: c.color} : {})}} onClick={() => { setTab(c.id); setEditIdx(-1); }}>
+              <span>{c.icon}</span><span style={s.sparkTabLabel}>{c.label}</span><span style={s.sparkTabCount}>{(pool[c.id] || []).length}</span>
+            </button>
+          ))}
+        </div>
+        <div style={s.sparkBlurb}>{cat.blurb}</div>
+        <div style={{...s.layoutList, gap:6}}>
+          {items.length === 0 && <div style={s.sparkBlurb}>No {cat.label.toLowerCase()} sparks yet.</div>}
+          {items.map((t, i) => (
+            <div key={i} style={s.poolRow}>
+              {editIdx === i ? (
+                <input style={{...s.editorInput,fontSize:13.5,padding:"8px 10px"}} autoFocus value={editText}
+                  onChange={e => setEditText(e.target.value)} onBlur={saveEdit}
+                  onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditIdx(-1); }} />
+              ) : (
+                <button style={s.poolText} className="list-text-btn" onClick={() => { setEditIdx(i); setEditText(t); }}>{t}</button>
+              )}
+              <button style={s.listItemDel} className="list-item-del" onClick={() => commit(items.filter((_, j) => j !== i))} title="Remove">✕</button>
+            </div>
+          ))}
+        </div>
+        <div style={{...s.listAddRow, marginTop:10}}>
+          <input style={{...s.modalInput,marginBottom:0,flex:1}} placeholder={`Add ${/^[aeiou]/i.test(cat.label) ? "an" : "a"} ${cat.label.toLowerCase()} spark…`} value={adding}
+            onChange={e => setAdding(e.target.value)} onKeyDown={e => { if (e.key === "Enter") add(); }} />
+          <button style={{...s.btnSave,...(adding.trim() ? {} : s.btnDisabled)}} onClick={add}>Add</button>
+        </div>
+        {onGenerate && (
+          <div style={s.poolGenRow}>
+            <button style={{...s.poolGenBtn,...(gen === "loading" ? s.btnDisabled : {})}} className="pool-gen-btn" onClick={() => generate(false)}>✨ More {cat.label.toLowerCase()}</button>
+            <button style={{...s.poolGenBtn,...(gen === "loading" ? s.btnDisabled : {})}} className="pool-gen-btn" onClick={() => generate(true)}>✨ More of all 4</button>
+          </div>
+        )}
+        {gen && <div style={s.sparkBlurb}>{gen === "loading" ? "✨ Asking Claude for ideas…" : gen}</div>}
+      </div>
     </div>
   );
 }
@@ -4226,6 +4673,49 @@ const s = {
   layoutMoveBtn: { background:"#2e2418", border:"1px solid #3a2e22", borderRadius:6, width:30, height:26, fontSize:11, color:"#c8a878", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
   layoutMoveDim: { opacity:0.3 },
   layoutFoot: { display:"flex", justifyContent:"flex-end", gap:10, paddingTop:14, marginTop:6, borderTop:"1px solid #3a2e22" },
+
+  // Boost mode
+  sparkChip: { display:"flex", alignItems:"flex-start", gap:5, background:"none", border:"none", padding:"3px 0 0", fontSize:12, fontFamily:"'DM Sans',sans-serif", cursor:"pointer", textAlign:"left", lineHeight:1.35, opacity:0.85 },
+  sparkChipIcon: { flexShrink:0 },
+  boostBar: { display:"flex", gap:8, marginBottom:16 },
+  boostJustOne: { flex:1, background:"#2e2418", border:"1px solid #6a5030", borderRadius:10, padding:"12px", fontSize:15, color:"#f4c97a", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:700 },
+  boostPoolBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:10, padding:"0 13px", fontSize:12.5, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, flexShrink:0 },
+  focusDoneCount: { fontSize:13, fontWeight:700, color:"#8ac878", fontFamily:"'DM Sans',sans-serif", minWidth:60, textAlign:"right" },
+  focusBody: { flex:1, overflowY:"auto", padding:"28px 20px 20px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative" },
+  focusEmpty: { margin:"auto 0", display:"flex", flexDirection:"column", alignItems:"center" },
+  focusLeft: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", letterSpacing:"0.04em", marginBottom:10 },
+  focusTask: { fontSize:"clamp(24px,7vw,34px)", fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", lineHeight:1.2, marginBottom:22, wordBreak:"break-word", maxWidth:520 },
+  focusSpark: { width:"100%", maxWidth:440, background:"#1c1712", border:"1.5px solid", borderRadius:14, padding:"14px 16px", marginBottom:22 },
+  focusSparkHead: { fontSize:11.5, fontWeight:800, letterSpacing:"0.1em", textTransform:"uppercase", fontFamily:"'DM Sans',sans-serif", marginBottom:6 },
+  focusSparkText: { fontSize:16.5, color:"#f0e4d0", fontFamily:"'DM Sans',sans-serif", lineHeight:1.4 },
+  focusSparkBtns: { display:"flex", justifyContent:"center", gap:8, marginTop:12 },
+  focusSmallBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:8, padding:"6px 12px", fontSize:12.5, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600 },
+  focusTimerBox: { display:"flex", flexDirection:"column", alignItems:"center", gap:10 },
+  focusClock: { fontSize:52, fontWeight:700, color:"#f4c97a", fontFamily:"'DM Sans',sans-serif", fontVariantNumeric:"tabular-nums", lineHeight:1 },
+  focusTimerHint: { fontSize:13, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif" },
+  focusMinRow: { display:"flex", gap:6 },
+  focusMinChip: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:16, padding:"5px 12px", fontSize:12.5, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  focusMinChipOn: { borderColor:"#c8a878", color:"#f4e4c4", background:"#2e2418" },
+  focusStart: { background:"linear-gradient(135deg,#f4c97a,#e0a84a)", border:"none", borderRadius:12, padding:"13px 28px", fontSize:16, fontWeight:700, color:"#1c1712", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  focusCheer: { position:"absolute", bottom:16, left:"50%", transform:"translateX(-50%)", background:"#1f3020", border:"1px solid #4a7a4a", color:"#a8e0a0", borderRadius:20, padding:"8px 18px", fontSize:14, fontWeight:700, fontFamily:"'DM Sans',sans-serif", whiteSpace:"nowrap" },
+  focusFoot: { display:"flex", gap:10, padding:"12px 16px", background:"#1c1712", borderTop:"1px solid #2a2018" },
+  focusSkip: { background:"none", border:"1px solid #4a3c2a", borderRadius:12, padding:"14px 18px", color:"#9a7f60", fontSize:15, cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  focusDone: { flex:1, background:"linear-gradient(135deg,#8ac878,#5fa860)", border:"none", borderRadius:12, padding:"14px", fontSize:17, fontWeight:800, color:"#132010", cursor:"pointer", fontFamily:"'DM Sans',sans-serif" },
+  sparkModal: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:16, padding:"18px", width:"100%", maxWidth:420, maxHeight:"88vh", display:"flex", flexDirection:"column" },
+  sparkTabs: { display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:5, marginBottom:8 },
+  sparkTab: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:9, padding:"7px 2px", fontSize:15, color:"#9a7f60", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", display:"flex", flexDirection:"column", alignItems:"center", gap:2, minWidth:0 },
+  sparkTabOn: { background:"#2e2418" },
+  sparkTabLabel: { fontSize:10.5, fontWeight:700, letterSpacing:"0.03em" },
+  sparkTabCount: { fontSize:10, opacity:0.7 },
+  sparkBlurb: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", margin:"2px 0 8px", lineHeight:1.4 },
+  sparkList: { display:"flex", flexDirection:"column", gap:5, overflowY:"auto", flex:1, minHeight:60 },
+  sparkOpt: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:9, padding:"10px 12px", fontSize:13.5, color:"#f0e4d0", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left", lineHeight:1.35 },
+  sparkOptOn: { background:"#2e2418" },
+  sparkSaveLbl: { display:"flex", alignItems:"center", gap:7, fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginTop:8, cursor:"pointer" },
+  poolRow: { display:"flex", alignItems:"center", gap:8, background:"#1c1712", border:"1px solid #2a2018", borderRadius:9, padding:"6px 6px 6px 10px" },
+  poolText: { flex:1, background:"none", border:"none", padding:"4px 0", fontSize:13.5, color:"#f0e4d0", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left", lineHeight:1.35 },
+  poolGenRow: { display:"flex", gap:8, marginTop:10 },
+  poolGenBtn: { flex:1, background:"#1e1830", border:"1px solid #3a2858", borderRadius:10, padding:"10px", fontSize:13, color:"#c4aae8", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:700 },
 };
 
 const chips = {

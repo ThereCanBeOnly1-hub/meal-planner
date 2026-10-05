@@ -9,7 +9,75 @@ import {
   sortListItems,
   sortRecipes, nextRecipeStatus, lastMadeLabel,
   weekStart,
+  DEFAULT_SPARK_POOL, normalizeSparkPool, mergeSparkPool, parseSpark, sparkToStr, itemSpark, nextSpark, focusQueue, formatClock,
 } from "./App";
+
+// ─── Boost mode (INCU sparks) ─────────────────────────────────────────────────
+describe("spark pool", () => {
+  it("normalizeSparkPool fills missing categories with defaults but keeps an emptied one empty", () => {
+    const p = normalizeSparkPool({ interest: ["  a  ", "", null], novelty: [] });
+    expect(p.interest).toEqual(["a"]);
+    expect(p.novelty).toEqual([]);
+    expect(p.challenge).toEqual(DEFAULT_SPARK_POOL.challenge);
+    expect(normalizeSparkPool(null).urgency).toEqual(DEFAULT_SPARK_POOL.urgency);
+  });
+  it("mergeSparkPool appends new sparks and skips case-insensitive duplicates", () => {
+    const base = { interest: ["Play music"], novelty: [], challenge: [], urgency: [] };
+    const { pool, added } = mergeSparkPool(base, { interest: ["play MUSIC", "Grab a snack", "Grab a snack"], bogus: ["x"] });
+    expect(pool.interest).toEqual(["Play music", "Grab a snack"]);
+    expect(added).toBe(1);
+  });
+});
+
+describe("item sparks", () => {
+  const pool = { interest: ["i1", "i2"], novelty: ["n1"], challenge: ["c1"], urgency: ["u1"] };
+  it("parseSpark round-trips sparkToStr and rejects junk / unknown categories", () => {
+    expect(parseSpark(sparkToStr({ c: "urgency", t: "Go" }))).toEqual({ c: "urgency", t: "Go" });
+    expect(parseSpark("")).toBeNull();
+    expect(parseSpark("produce")).toBeNull();
+    expect(parseSpark('{"c":"nope","t":"x"}')).toBeNull();
+    expect(parseSpark('{"c":"interest","t":"  "}')).toBeNull();
+    expect(parseSpark("{bad json")).toBeNull();
+  });
+  it("itemSpark prefers the saved spark, else a stable pick from the pool", () => {
+    expect(itemSpark({ id: "a", category: sparkToStr({ c: "novelty", t: "mine" }) }, pool)).toEqual({ c: "novelty", t: "mine" });
+    const auto = itemSpark({ id: "task-42", category: "" }, pool);
+    expect(pool[auto.c]).toContain(auto.t);
+    expect(itemSpark({ id: "task-42", category: "" }, pool)).toEqual(auto); // deterministic
+    expect(itemSpark({ id: "x" }, { interest: [], novelty: [], challenge: [], urgency: [] })).toBeNull();
+  });
+  it("itemSpark spreads tasks across categories", () => {
+    const cats = new Set(Array.from({ length: 40 }, (_, i) => itemSpark({ id: "id" + i }, pool).c));
+    expect(cats.size).toBe(4);
+  });
+  it("nextSpark avoids the current spark when there's an alternative, and respects a category", () => {
+    const cur = { c: "interest", t: "i1" };
+    for (let r = 0; r < 1; r += 0.1) expect(nextSpark(cur, pool, null, () => r)).not.toEqual(cur);
+    expect(nextSpark(cur, pool, "interest", () => 0)).toEqual({ c: "interest", t: "i2" });
+    expect(nextSpark({ c: "novelty", t: "n1" }, pool, "novelty", () => 0)).toEqual({ c: "novelty", t: "n1" }); // only one option
+  });
+});
+
+describe("focusQueue", () => {
+  const items = [
+    { id: "a", text: "A", checked: false, position: 0 },
+    { id: "b", text: "B", checked: true, position: 1 },
+    { id: "c", text: "C", checked: false, position: 2 },
+    { id: "d", text: "D", checked: false, position: 3 },
+  ];
+  it("lists open tasks in sort order", () => {
+    expect(focusQueue(items, "manual").map(i => i.id)).toEqual(["a", "c", "d"]);
+    expect(focusQueue(items, "za").map(i => i.id)).toEqual(["d", "c", "a"]);
+  });
+  it("moves skipped tasks to the back in skip order", () => {
+    expect(focusQueue(items, "manual", ["c", "a"]).map(i => i.id)).toEqual(["d", "c", "a"]);
+  });
+  it("formatClock renders m:ss and never goes negative", () => {
+    expect(formatClock(600)).toBe("10:00");
+    expect(formatClock(65.2)).toBe("1:06");
+    expect(formatClock(-3)).toBe("0:00");
+  });
+});
 
 // ─── Week start key (timezone stability) ─────────────────────────────────────────
 describe("weekStart", () => {
