@@ -3922,6 +3922,44 @@ function ListDetail({ list, onBack, onAddItem, onToggleItem, onDeleteItem, onCle
 // One task at a time with its spark, an optional short timer (a self-chosen,
 // low-stakes deadline), Done / Skip. Skips are session-only — the task just
 // moves to the back of the queue. Overlay history pattern ({overlay:"focus"}).
+// Lock page scroll while an overlay is mounted, so scrolling inside it (or
+// overscrolling past its end) doesn't drag the list behind. Restores the prior
+// value on unmount, so stacked overlays (picker over focus) unwind correctly.
+function useScrollLock() {
+  useEffect(() => {
+    const html = document.documentElement, body = document.body;
+    const prev = [html.style.overflow, body.style.overflow];
+    html.style.overflow = "hidden"; body.style.overflow = "hidden";
+    return () => { html.style.overflow = prev[0]; body.style.overflow = prev[1]; };
+  }, []);
+}
+
+// Timer alerts. A web page can't vibrate (or run timers reliably) while the
+// screen is off / the app is backgrounded, so while a focus timer runs we hold
+// a screen wake lock, and also play a short chime — iOS has no vibrate at all.
+// The AudioContext is created inside the Start tap so mobile browsers allow it.
+let _chimeCtx = null;
+const primeChime = () => {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    if (!_chimeCtx) _chimeCtx = new AC();
+    if (_chimeCtx.state === "suspended") _chimeCtx.resume();
+  } catch {}
+};
+const playChime = () => {
+  try {
+    const ctx = _chimeCtx; if (!ctx) return;
+    if (ctx.state === "suspended") ctx.resume();
+    [0, 0.22, 0.44].forEach((at, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), t0 = ctx.currentTime + at;
+      o.type = "sine"; o.frequency.value = [660, 880, 1320][i];
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.35, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.5);
+      o.connect(g).connect(ctx.destination); o.start(t0); o.stop(t0 + 0.55);
+    });
+  } catch {}
+};
+const buzz = () => { try { navigator.vibrate && navigator.vibrate([300, 150, 300, 150, 300]); } catch {} };
+
 const FOCUS_MINUTES = [5, 10, 25];
 const FOCUS_CHEERS = ["Nice. That counts.", "Done! Momentum unlocked.", "One down. 🎉", "Look at you go.", "That's a win — take it."];
 function FocusMode({ list, sortMode, pool, onToggle, onSetSpark, onPickSpark, onClose }) {
@@ -3939,16 +3977,32 @@ function FocusMode({ list, sortMode, pool, onToggle, onSetSpark, onPickSpark, on
   const remaining = timer ? (timer.endsAt - now) / 1000 : 0;
   const timeUp = !!timer && remaining <= 0;
 
+  useScrollLock();
   useEffect(() => {
     if (!timer) return;
     const id = setInterval(() => setNow(Date.now()), 250);
     return () => clearInterval(id);
   }, [timer]);
+  // Keep the screen on while the countdown runs (released when it ends/stops).
+  // The browser drops the lock whenever the page is hidden, so re-take it on
+  // return — and tick immediately so a timer that ended meanwhile alerts now.
+  const counting = !!timer && !timeUp;
   useEffect(() => {
-    if (timeUp && !buzzedRef.current) { buzzedRef.current = true; try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch {} }
+    if (!counting) return;
+    let lock = null, gone = false;
+    const acquire = async () => {
+      try { if (navigator.wakeLock && document.visibilityState === "visible") { lock = await navigator.wakeLock.request("screen"); if (gone) lock.release(); } } catch {}
+    };
+    const onVis = () => { if (document.visibilityState === "visible") { setNow(Date.now()); acquire(); } };
+    acquire();
+    document.addEventListener("visibilitychange", onVis);
+    return () => { gone = true; document.removeEventListener("visibilitychange", onVis); try { lock && lock.release(); } catch {} };
+  }, [counting]);
+  useEffect(() => {
+    if (timeUp && !buzzedRef.current) { buzzedRef.current = true; buzz(); playChime(); }
   }, [timeUp]);
 
-  const startTimer = () => { buzzedRef.current = false; const t = Date.now(); setNow(t); setTimer({ endsAt: t + mins * 60000 }); };
+  const startTimer = () => { primeChime(); buzzedRef.current = false; const t = Date.now(); setNow(t); setTimer({ endsAt: t + mins * 60000 }); };
   const done = () => {
     if (!task) return;
     onToggle(list.id, task.id);
@@ -4029,6 +4083,7 @@ function FocusMode({ list, sortMode, pool, onToggle, onSetSpark, onPickSpark, on
 
 // ─── Boost mode: per-task spark picker ────────────────────────────────────────
 function SparkPicker({ item, pool, current, onPick, onAddToPool, onClose }) {
+  useScrollLock();
   const [tab, setTab] = useState(current?.c || SPARK_CATS[0].id);
   const [own, setOwn] = useState("");
   const [saveToPool, setSaveToPool] = useState(true);
@@ -4085,6 +4140,7 @@ function SparkPicker({ item, pool, current, onPick, onAddToPool, onClose }) {
 // lost to a Cancel). Grouped by INCU category; Claude can top up one category
 // or all four on demand.
 function SparkPoolEditor({ pool, onSave, onGenerate, tasks, onClose }) {
+  useScrollLock();
   const [tab, setTab] = useState(SPARK_CATS[0].id);
   const [adding, setAdding] = useState("");
   const [editIdx, setEditIdx] = useState(-1);
@@ -4667,7 +4723,7 @@ const s = {
 
   layoutEditor: { background:"#2a2118", border:"1px solid #4a3c2a", borderRadius:16, padding:"18px", width:"100%", maxWidth:440, maxHeight:"88vh", display:"flex", flexDirection:"column" },
   layoutHint: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginBottom:12, lineHeight:1.45 },
-  layoutList: { display:"flex", flexDirection:"column", gap:8, overflowY:"auto", flex:1 },
+  layoutList: { overscrollBehavior:"contain", display:"flex", flexDirection:"column", gap:8, overflowY:"auto", flex:1 },
   layoutRow: { display:"flex", gap:9, alignItems:"flex-start", background:"#1c1712", border:"1px solid #2a2018", borderRadius:10, padding:"9px" },
   layoutMoveCol: { display:"flex", flexDirection:"column", gap:3, flexShrink:0 },
   layoutMoveBtn: { background:"#2e2418", border:"1px solid #3a2e22", borderRadius:6, width:30, height:26, fontSize:11, color:"#c8a878", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", lineHeight:1 },
@@ -4681,7 +4737,7 @@ const s = {
   boostJustOne: { flex:1, background:"#2e2418", border:"1px solid #6a5030", borderRadius:10, padding:"12px", fontSize:15, color:"#f4c97a", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:700 },
   boostPoolBtn: { background:"#241e16", border:"1px solid #3a2e22", borderRadius:10, padding:"0 13px", fontSize:12.5, color:"#c8a878", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", fontWeight:600, flexShrink:0 },
   focusDoneCount: { fontSize:13, fontWeight:700, color:"#8ac878", fontFamily:"'DM Sans',sans-serif", minWidth:60, textAlign:"right" },
-  focusBody: { flex:1, overflowY:"auto", padding:"28px 20px 20px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative" },
+  focusBody: { overscrollBehavior:"contain", flex:1, overflowY:"auto", padding:"28px 20px 20px", display:"flex", flexDirection:"column", alignItems:"center", textAlign:"center", position:"relative" },
   focusEmpty: { margin:"auto 0", display:"flex", flexDirection:"column", alignItems:"center" },
   focusLeft: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", letterSpacing:"0.04em", marginBottom:10 },
   focusTask: { fontSize:"clamp(24px,7vw,34px)", fontWeight:700, color:"#f4e4c4", fontFamily:"'Lora',Georgia,serif", lineHeight:1.2, marginBottom:22, wordBreak:"break-word", maxWidth:520 },
@@ -4708,7 +4764,7 @@ const s = {
   sparkTabLabel: { fontSize:10.5, fontWeight:700, letterSpacing:"0.03em" },
   sparkTabCount: { fontSize:10, opacity:0.7 },
   sparkBlurb: { fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", margin:"2px 0 8px", lineHeight:1.4 },
-  sparkList: { display:"flex", flexDirection:"column", gap:5, overflowY:"auto", flex:1, minHeight:60 },
+  sparkList: { overscrollBehavior:"contain", display:"flex", flexDirection:"column", gap:5, overflowY:"auto", flex:1, minHeight:60 },
   sparkOpt: { background:"#1c1712", border:"1px solid #3a2e22", borderRadius:9, padding:"10px 12px", fontSize:13.5, color:"#f0e4d0", cursor:"pointer", fontFamily:"'DM Sans',sans-serif", textAlign:"left", lineHeight:1.35 },
   sparkOptOn: { background:"#2e2418" },
   sparkSaveLbl: { display:"flex", alignItems:"center", gap:7, fontSize:12, color:"#9a7f60", fontFamily:"'DM Sans',sans-serif", marginTop:8, cursor:"pointer" },

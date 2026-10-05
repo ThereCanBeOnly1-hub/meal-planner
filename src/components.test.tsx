@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, act } from "@testing-library/react";
 import { RecipesView, TagPicker, ListDetail, ListItemsList, ListIndex, SparkPoolEditor } from "./App";
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -33,6 +33,29 @@ describe("Boost mode", () => {
     fireEvent.click(screen.getByText("Interest"));        // Interest tab in the picker
     fireEvent.click(screen.getByText("Play music"));
     expect(onSetItemSpark).toHaveBeenCalledWith("L1", "t1", { c: "interest", t: "Play music" });
+  });
+
+  it("the focus timer vibrates when it runs out, and the page behind can't scroll while it's open", () => {
+    vi.useFakeTimers();
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, "vibrate", { value: vibrate, configurable: true });
+    try {
+      const { unmount } = renderDetail({ boost: true });
+      fireEvent.click(screen.getByText("🎯 Just one"));
+      expect(document.body.style.overflow).toBe("hidden");
+      fireEvent.click(screen.getByText("5 min"));
+      fireEvent.click(screen.getByText("▶ Start 5 min"));
+      act(() => { vi.advanceTimersByTime(4 * 60000); });
+      expect(vibrate).not.toHaveBeenCalled();
+      act(() => { vi.advanceTimersByTime(60000 + 500); });
+      expect(vibrate).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("⏰ Time!")).toBeTruthy();
+      unmount();
+      expect(document.body.style.overflow).toBe("");
+    } finally {
+      vi.useRealTimers();
+      delete navigator.vibrate;
+    }
   });
 
   it("Just one shows the first open task; Skip moves on and Done checks it off", () => {
